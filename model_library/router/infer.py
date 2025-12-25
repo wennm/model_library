@@ -235,7 +235,7 @@ async def start_inference(
                 }
 
         # 生成唯一任务ID
-        task_id = str(uuid.uuid4())
+        task_id = str(uuid.uuid4()).replace('-', '_')
 
         # 创建workflow实例
         workflow = Detector(
