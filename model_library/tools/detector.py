@@ -610,16 +610,25 @@ class Detector:
                         self._should_stop = True
                         break
 
-                    if len(result) == 0:
-                        continue
-
                     # 每次推理都输出日志（与Model 3保持一致）
                     log_task(f"模型8推理中")
+
+                    # 如果没有检测到目标，直接跳过
+                    if len(result) == 0:
+                        log_task_debug(
+                            f"[模型8验证] 当前帧未检测到任何目标"
+                        )
+                        continue
 
                     # 使用模型的帧级别聚集检测方法
                     current_timestamp = datetime.now().timestamp()
                     frame_report = self.model.detect_gathering_and_get_frame_report(
                         result, current_timestamp
+                    )
+
+                    # 输出验证汇总日志
+                    log_task_debug(
+                        f"[模型8验证汇总] 原始检测数:{len(result)}, 聚集数:{frame_report['gathering_count']}, 飙车数:{frame_report['racing_count']}, 需上报数:{len(frame_report['tracking_infos'])}"
                     )
 
                     # 如果没有飙车或者没有需要上报的目标，跳过

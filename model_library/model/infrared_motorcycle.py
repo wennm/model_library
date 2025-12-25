@@ -65,7 +65,10 @@ class InfraredMotorcycleModel(BaseModel):
         Returns:
             List[Dict]: 目标框列表
         """
+        from ..tools.logger import log_task_debug
+
         results_dict = []
+        filtered_count = 0  # 统计被过滤的目标数
         for result in results:
             if len(result) == 0:
                 continue
@@ -93,6 +96,7 @@ class InfraredMotorcycleModel(BaseModel):
 
                 # 应用置信度阈值过滤
                 if confidence < self.confidence_threshold:
+                    filtered_count += 1
                     continue
 
                 box_params = {
@@ -107,6 +111,12 @@ class InfraredMotorcycleModel(BaseModel):
                     "text": ""
                 }
                 results_dict.append(box_params)
+
+        # 输出置信度过滤汇总日志
+        if filtered_count > 0:
+            log_task_debug(
+                f"[模型8验证] 置信度过滤 - 通过:{len(results_dict)}, 过滤:{filtered_count}, 阈值:{self.confidence_threshold:.3f}"
+            )
 
         return results_dict
 

@@ -49,7 +49,12 @@ class DistanceGatheringStrategy(MotorcycleGatheringStrategy):
         2. 找出每个目标框的邻居（距离小于阈值）
         3. 找出满足最小聚集数量的目标组
         """
+        from .logger import log_task_debug
+
         if len(motorcycle_boxes) < self.min_gathering_count:
+            log_task_debug(
+                f"[模型8验证] 聚集检测失败 - 目标数量不足: {len(motorcycle_boxes)} < {self.min_gathering_count}"
+            )
             return []
 
         n = len(motorcycle_boxes)
@@ -86,6 +91,15 @@ class DistanceGatheringStrategy(MotorcycleGatheringStrategy):
                 # 如果连通分量大小满足最小聚集数量，则加入结果
                 if len(component) >= self.min_gathering_count:
                     gathering_indices.extend(component)
+
+        if gathering_indices:
+            log_task_debug(
+                f"[模型8验证] 聚集检测通过 - 检测到{len(gathering_indices)}个聚集目标"
+            )
+        else:
+            log_task_debug(
+                f"[模型8验证] 聚集检测失败 - 没有满足距离阈值的聚集组 (距离阈值:{self.distance_threshold}px, 最小数量:{self.min_gathering_count})"
+            )
 
         return gathering_indices
 
@@ -182,6 +196,8 @@ class MotorcycleGatheringManager:
         Returns:
             Tuple[List[Dict], List[int]]: (飙车的目标框列表, 飙车的索引列表)
         """
+        from .logger import log_task_debug
+
         if not motorcycle_boxes:
             return [], []
 
@@ -198,6 +214,9 @@ class MotorcycleGatheringManager:
         for idx, box in enumerate(gathering_boxes):
             track_id = box.get('track_id')
             if not track_id or track_id == 'unknown':
+                log_task_debug(
+                    f"[模型8验证] 飙车检测跳过 - track_id未知"
+                )
                 continue
 
             # 计算速度
@@ -207,6 +226,13 @@ class MotorcycleGatheringManager:
             if speed >= self.racing_speed_threshold:
                 racing_boxes.append(box)
                 racing_indices.append(gathering_indices[idx])
+                log_task_debug(
+                    f"[模型8验证] 飙车检测通过 - track_id:{track_id}, 速度:{speed:.2f}px/s >= {self.racing_speed_threshold}px/s, 方向:{direction}"
+                )
+            else:
+                log_task_debug(
+                    f"[模型8验证] 飙车检测失败 - track_id:{track_id}, 速度:{speed:.2f}px/s < {self.racing_speed_threshold}px/s, 方向:{direction}"
+                )
 
         return racing_boxes, racing_indices
 
