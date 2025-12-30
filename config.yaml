@@ -70,8 +70,8 @@ model:
       prompt: "图中红色框选区域内是否发生了车辆碰撞或交通事故？疑似剐蹭也算，如两辆车贴得很近，周围有两个以上的人在查看车辆，一定要有人。请只回答是或否。"
       # prompt: "这是无人机视角下的图片，图中红色框选区域内是否有两个或以上的人。请只回答是或否。"  #后备prompt
       # model: "Qwen/Qwen2.5-VL-72B-Instruct" # 可选：覆盖全局配置的模型
-      timeout: 4  # API 超时时间（秒）
-      stream_timeout: 7  # 流式接收超时时间（秒），超时后降级使用算法验证结果
+      timeout: 5  # API 超时时间（秒）
+      stream_timeout: 8  # 流式接收超时时间（秒），超时后降级使用算法验证结果
       total_timeout: 15.0  # 硬性总超时时间（秒），超过此时间直接降级使用算法验证结果
       # modelscope:
       #   api_key: "sk-d2d735f9d40b42b5bb2c777df2fc864b"
@@ -146,7 +146,7 @@ model:
     model_name: "infrared_motorcycle"
     class_path: "model_library.model.infrared_motorcycle.InfraredMotorcycleModel"
     model_path: "weight/model8_infrared_motorcycle_yolo12x_v1.1.pt"    # 夜间红外摩托车检测
-    config: 0.55  # 检测置信度阈值
+    config: 0.2  # 检测置信度阈值
     classes: [0]  # 0: motorcycle
     imgsz: 0  # 不采用原图大小，支持SAHI切片推理
     # GPU配置
@@ -155,7 +155,7 @@ model:
     # SAHI配置
     enable_sahi: true  # 是否启用SAHI切片推理
     sahi_config:
-      initial_confidence: 0.55  # SAHI初始检测置信度
+      initial_confidence: 0.2  # SAHI初始检测置信度
       device: null  # 自动选择设备
       slice_params:  # 可选的自定义切片参数
         slice_height: 1080
@@ -165,8 +165,8 @@ model:
     # 聚集检测配置
     gathering_strategy: "distance"  # 可选: distance, none
     gathering_config:
-      distance_threshold: 300  # ⭐ 距离阈值（像素），判断聚集的距离
-      min_gathering_count: 3    # ⭐ 最少聚集数量（固定为3）
+      distance_threshold: 200  # ⭐ 距离阈值（像素），判断聚集的距离
+      min_gathering_count: 1    # ⭐ 最少聚集数量（固定为3）
       use_center_distance: true  # 使用中心点距离
       speed_window_size: 2        # 速度计算使用的帧数窗口（仅用于计算速度，不影响上报）
     # ========== 新追踪模式配置 ==========

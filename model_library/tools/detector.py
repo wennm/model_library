@@ -711,8 +711,9 @@ class Detector:
                             mqtt_success = self.mqtt_client.publish_message(self.topic, mqtt_message)
 
                     else:
-                        # 不在追踪模式，检测是否满足3车聚集条件
-                        if len(all_motorcycles) >= 3:
+                        # 不在追踪模式，检测是否满足聚集条件
+                        min_count = self.gathering_manager.strategy.min_gathering_count if self.gathering_manager else 3
+                        if len(all_motorcycles) >= min_count:
                             # 检测聚集
                             gathering_boxes, _ = self.gathering_manager.detect_gathering_motorcycles(all_motorcycles)
 
@@ -722,13 +723,13 @@ class Detector:
 
                                 if success:
                                     tracking_target_id = self.gathering_manager.get_tracking_target_id()
-                                    log_task(f"[模型8追踪] 检测到3车聚集，进入追踪模式 - track_id:{tracking_target_id}")
+                                    log_task(f"[模型8追踪] 检测到{len(gathering_boxes)}车聚集（min_count={min_count}），进入追踪模式 - track_id:{tracking_target_id}")
                                 else:
                                     log_task_debug(f"[模型8追踪] 无法进入追踪模式（无有效track_id）")
                             else:
                                 log_task_debug(f"[模型8追踪] 检测到{len(all_motorcycles)}个摩托车，但未满足聚集条件")
                         else:
-                            log_task_debug(f"[模型8追踪] 未满足聚集条件（<3辆摩托车），当前数量:{len(all_motorcycles)}")
+                            log_task_debug(f"[模型8追踪] 未满足聚集条件（<{min_count}辆摩托车），当前数量:{len(all_motorcycles)}")
 
 
             else:
