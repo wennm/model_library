@@ -146,7 +146,7 @@ model:
     model_name: "infrared_motorcycle"
     class_path: "model_library.model.infrared_motorcycle.InfraredMotorcycleModel"
     model_path: "weight/model8_infrared_motorcycle_yolo12x_v1.1.pt"    # 夜间红外摩托车检测
-    config: 0.6  # 检测置信度阈值
+    config: 0.55  # 检测置信度阈值
     classes: [0]  # 0: motorcycle
     imgsz: 0  # 不采用原图大小，支持SAHI切片推理
     # GPU配置
@@ -155,33 +155,23 @@ model:
     # SAHI配置
     enable_sahi: true  # 是否启用SAHI切片推理
     sahi_config:
-      initial_confidence: 0.7  # SAHI初始检测置信度
+      initial_confidence: 0.55  # SAHI初始检测置信度
       device: null  # 自动选择设备
       slice_params:  # 可选的自定义切片参数
-        slice_height: 928
-        slice_width: 928
+        slice_height: 1080
+        slice_width: 1080
         overlap_height_ratio: 0.2
         overlap_width_ratio: 0.2
     # 聚集检测配置
-    # gathering_strategy: "distance"  # 可选: distance, none
-    # gathering_config:
-    #   distance_threshold: 200  # 距离阈值（像素），判断聚集的距离
-    #   min_gathering_count: 3  # 最少聚集数量
-    #   use_center_distance: true  # 使用中心点距离
-    #   speed_window_size: 2  # 计算速度使用的帧数窗口
-    #   racing_speed_threshold: 50.0  # 飙车速度阈值（像素/秒），只有达到此速度才会上报
-    #   track_timeout: 5.0  # 目标丢失超时时间（秒），超过此时间未检测到目标则停止上报
-    # report_interval: 1.0  # 追踪上报间隔（秒）
-        # 测试聚集检测配置
     gathering_strategy: "distance"  # 可选: distance, none
     gathering_config:
-      distance_threshold: 400  # 距离阈值（像素），判断聚集的距离
-      min_gathering_count: 3  # 最少聚集数量
+      distance_threshold: 300  # ⭐ 距离阈值（像素），判断聚集的距离
+      min_gathering_count: 3    # ⭐ 最少聚集数量（固定为3）
       use_center_distance: true  # 使用中心点距离
-      speed_window_size: 2  # 计算速度使用的帧数窗口
-      racing_speed_threshold: 20.0  # 飙车速度阈值（像素/秒），只有达到此速度才会上报
-      track_timeout: 5.0  # 目标丢失超时时间（秒），超过此时间未检测到目标则停止上报
-    report_interval: 1.0  # 追踪上报间隔（秒）
+      speed_window_size: 2        # 速度计算使用的帧数窗口（仅用于计算速度，不影响上报）
+    # ========== 新追踪模式配置 ==========
+    tracking_mode_duration: 5.0  # ⭐⭐⭐ 追踪模式持续时间（秒），默认5秒
+    report_interval: 1.0         # ⭐⭐⭐ 追踪上报间隔（秒），默认1秒
 
 
 mqtt:

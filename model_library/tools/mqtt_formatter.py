@@ -200,4 +200,127 @@ class MQTTMessageFormatter:
 
         return mqtt_message
 
+    @staticmethod
+    def format_motorcycle_tracking_mode_message(
+        object_name: str,
+        tracking_info: Dict[str, Any],
+        ori_img_shape: tuple,
+        task_id: str,
+        timestamp_str: str
+    ) -> Dict[str, Any]:
+        """
+        格式化摩托车追踪模式MQTT消息（单目标追踪上报）
+
+        Args:
+            object_name: 检测图片存储对象名
+            tracking_info: 追踪信息，包含:
+                - track_id: 跟踪ID
+                - box: 目标框信息
+                - speed: 速度信息
+                - tracking_state: 追踪状态 (tracking/lost)
+                - elapsed_time: 已追踪时间
+            ori_img_shape: 原始图像尺寸
+            task_id: 任务ID
+            timestamp_str: 时间戳字符串
+
+        Returns:
+            dict: 摩托车追踪模式MQTT消息
+        """
+        track_id = tracking_info['track_id']
+        box_info = tracking_info['box']
+        speed_info = tracking_info.get('speed', {})
+        tracking_state = tracking_info.get('tracking_state', 'unknown')
+        elapsed_time = tracking_info.get('elapsed_time', 0.0)
+
+        # 构建单个目标框信息
+        box_data = {
+            "x": box_info['x'],
+            "y": box_info['y'],
+            "width": box_info['width'],
+            "height": box_info['height'],
+            "score": box_info['score'],
+            "track_id": track_id,
+            "className": box_info.get('class', 'motorcycle')
+        }
+
+        # 添加速度信息
+        if speed_info:
+            box_data["speed_pixels_per_second"] = speed_info.get('pixels_per_second', 0)
+            box_data["direction_angle"] = speed_info.get('angle_degrees', 0)
+            box_data["direction"] = speed_info.get('direction', 'unknown')
+
+        # 构建MQTT消息
+        mqtt_message = {"imageInfo": {}}
+        mqtt_message["imageInfo"]["imageId"] = ""
+        mqtt_message["imageInfo"]["dataType"] = "url"
+        mqtt_message["imageInfo"]["imageUrl"] = object_name
+        mqtt_message["imageInfo"]["data"] = ""
+        mqtt_message["imageInfo"]["objNum"] = 1
+        mqtt_message["imageInfo"]["boxs"] = [box_data]
+        mqtt_message["imageInfo"]["imageWidth"] = ori_img_shape[1]
+        mqtt_message["imageInfo"]["imageHeight"] = ori_img_shape[0]
+        mqtt_message["imageInfo"]["imageSize"] = ""
+        mqtt_message["imageInfo"]["task_id"] = task_id
+        mqtt_message["imageInfo"]["timestamp"] = timestamp_str
+
+        # 构建消息内容
+        state_text = "追踪中" if tracking_state == "tracking" else "目标丢失"
+        speed_text = f"{speed_info.get('pixels_per_second', 0):.1f}像素/秒" if speed_info else "未知"
+        direction_text = speed_info.get('direction', '未知') if speed_info else "未知"
+
+        message_parts = [
+            f"摩托车追踪模式",
+            f"追踪状态:{state_text}",
+            f"track_id:{track_id}",
+            f"已追踪时间:{elapsed_time:.1f}秒",
+            f"速度:{speed_text}",
+            f"方向:{direction_text}"
+        ]
+
+        mqtt_message["imageInfo"]["message"] = ", ".join(message_parts)
+
+        return mqtt_message
+
+    @staticmethod
+    def format_tracking_failure_message(
+        track_id: str,
+        elapsed_time: float,
+        task_id: str,
+        timestamp_str: str
+    ) -> Dict[str, Any]:
+        """
+        格式化追踪失败MQTT消息
+
+        Args:
+            track_id: 跟踪ID
+            elapsed_time: 追踪持续时间（秒）
+            task_id: 任务ID
+            timestamp_str: 时间戳字符串
+
+        Returns:
+            dict: 追踪失败MQTT消息
+        """
+        # 构建MQTT消息
+        mqtt_message = {"imageInfo": {}}
+        mqtt_message["imageInfo"]["imageId"] = ""
+        mqtt_message["imageInfo"]["dataType"] = "url"
+        mqtt_message["imageInfo"]["imageUrl"] = ""  # 追踪失败时没有图片
+        mqtt_message["imageInfo"]["data"] = ""
+        mqtt_message["imageInfo"]["objNum"] = 0
+        mqtt_message["imageInfo"]["boxs"] = []
+        mqtt_message["imageInfo"]["imageWidth"] = 0
+        mqtt_message["imageInfo"]["imageHeight"] = 0
+        mqtt_message["imageInfo"]["imageSize"] = ""
+        mqtt_message["imageInfo"]["task_id"] = task_id
+        mqtt_message["imageInfo"]["timestamp"] = timestamp_str
+
+        # 添加追踪失败信息
+        mqtt_message["imageInfo"]["track_id"] = track_id
+        mqtt_message["imageInfo"]["tracking_status"] = "failed"
+        mqtt_message["imageInfo"]["elapsed_time"] = round(elapsed_time, 2)
+        mqtt_message["imageInfo"]["message"] = f"追踪失败, track_id:{track_id}, 追踪持续时间:{elapsed_time:.2f}秒"
+
+        return mqtt_message
+
+
 

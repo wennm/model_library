@@ -1,9 +1,18 @@
 """摩托车聚集检测策略模块 - 用于检测夜间红外飙车场景"""
 import math
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from datetime import datetime
 from collections import defaultdict
+from enum import Enum
+
+
+class TrackingState(Enum):
+    """追踪状态枚举"""
+    IDLE = "idle"  # 空闲状态，未进入追踪模式
+    TRACKING = "tracking"  # 追踪中
+    LOST = "lost"  # 目标丢失，但未超时
+    FAILED = "failed"  # 追踪失败
 
 
 class MotorcycleGatheringStrategy(ABC):
@@ -161,11 +170,14 @@ class MotorcycleGatheringManager:
         self.speed_window_size = config.get('speed_window_size', 2)  # 计算速度使用的帧数窗口
         self.report_interval = config.get('report_interval', 1.0)  # 上报间隔（秒）
 
-        # 飙车判断相关
-        self.racing_speed_threshold = config.get('racing_speed_threshold', 20.0)  # 飙车速度阈值（像素/秒）
-
-        # 目标丢失超时时间（秒）
-        self.track_timeout = config.get('track_timeout', 5.0)
+        # ========== 新增：追踪模式相关属性 ==========
+        self.tracking_mode_duration = config.get('tracking_mode_duration', 5.0)  # 追踪模式持续时间（秒）
+        self.tracking_state = TrackingState.IDLE  # 当前追踪状态
+        self.tracking_target_id: Optional[str] = None  # 当前追踪的target_id
+        self.tracking_start_time: Optional[float] = None  # 追踪开始时间
+        self.tracking_last_report_time: Optional[float] = None  # 追踪模式最后上报时间
+        self.tracking_last_known_info: Optional[Dict] = None  # 最后已知的追踪目标信息（用于丢失时上报）
+        self.tracking_lost_start_time: Optional[float] = None  # ✅ 新增：目标丢失开始时间
 
     def detect_gathering_motorcycles(self, motorcycle_boxes: List[Dict]) -> Tuple[List[Dict], List[int]]:
         """
@@ -184,57 +196,6 @@ class MotorcycleGatheringManager:
         gathering_boxes = [motorcycle_boxes[i] for i in gathering_indices]
 
         return gathering_boxes, gathering_indices
-
-    def detect_racing_motorcycles(self, motorcycle_boxes: List[Dict], current_time: float) -> Tuple[List[Dict], List[int]]:
-        """
-        检测聚集且速度达到飙车阈值的摩托车
-
-        Args:
-            motorcycle_boxes: 摩托车目标框列表
-            current_time: 当前时间戳
-
-        Returns:
-            Tuple[List[Dict], List[int]]: (飙车的目标框列表, 飙车的索引列表)
-        """
-        from .logger import log_task_debug
-
-        if not motorcycle_boxes:
-            return [], []
-
-        # 第一步：检测聚集
-        gathering_boxes, gathering_indices = self.detect_gathering_motorcycles(motorcycle_boxes)
-
-        if not gathering_boxes:
-            return [], []
-
-        # 第二步：计算聚集目标的速度，过滤出达到飙车阈值的目标
-        racing_boxes = []
-        racing_indices = []
-
-        for idx, box in enumerate(gathering_boxes):
-            track_id = box.get('track_id')
-            if not track_id or track_id == 'unknown':
-                log_task_debug(
-                    f"[模型8验证] 飙车检测跳过 - track_id未知"
-                )
-                continue
-
-            # 计算速度
-            speed, angle, direction = self.calculate_speed_and_direction(track_id)
-
-            # 判断是否达到飙车阈值
-            if speed >= self.racing_speed_threshold:
-                racing_boxes.append(box)
-                racing_indices.append(gathering_indices[idx])
-                log_task_debug(
-                    f"[模型8验证] 飙车检测通过 - track_id:{track_id}, 速度:{speed:.2f}px/s >= {self.racing_speed_threshold}px/s, 方向:{direction}"
-                )
-            else:
-                log_task_debug(
-                    f"[模型8验证] 飙车检测失败 - track_id:{track_id}, 速度:{speed:.2f}px/s < {self.racing_speed_threshold}px/s, 方向:{direction}"
-                )
-
-        return racing_boxes, racing_indices
 
     def update_tracking_history(self, boxes: List[Dict], current_time: float = None):
         """
@@ -333,108 +294,196 @@ class MotorcycleGatheringManager:
         else:
             return "northeast"  # 东北
 
-    def should_report(self, track_id: str, current_time: float) -> bool:
+    # ========== 新增：追踪模式相关方法 ==========
+
+    def enter_tracking_mode(self, motorcycle_boxes: List[Dict], current_time: float) -> bool:
         """
-        判断是否应该上报该目标
+        进入追踪模式
+
+        选择置信度最高的track_id作为追踪目标
 
         Args:
-            track_id: 跟踪ID
+            motorcycle_boxes: 聚集的摩托车目标框列表
             current_time: 当前时间戳
 
         Returns:
-            bool: 是否应该上报
+            bool: 是否成功进入追踪模式
         """
-        # 检查目标是否超时（丢失超过5秒）
-        if track_id in self.last_detection_time_map:
-            time_since_last_detection = current_time - self.last_detection_time_map[track_id]
-            if time_since_last_detection > self.track_timeout:
-                # 目标超时，不再上报
-                return False
+        if not motorcycle_boxes:
+            return False
 
-        if track_id not in self.report_time_map:
-            # 首次上报
-            self.report_time_map[track_id] = current_time
-            return True
+        # 选择置信度最高的track_id
+        best_box = max(motorcycle_boxes, key=lambda b: b.get('score', 0))
+        track_id = best_box.get('track_id')
 
-        # 检查是否超过上报间隔
-        time_since_last_report = current_time - self.report_time_map[track_id]
-        if time_since_last_report >= self.report_interval:
-            self.report_time_map[track_id] = current_time
-            return True
+        if not track_id or track_id == 'unknown':
+            return False
 
-        return False
+        # 进入追踪模式
+        self.tracking_state = TrackingState.TRACKING
+        self.tracking_target_id = track_id
+        self.tracking_start_time = current_time
+        self.tracking_last_report_time = current_time
 
-    def get_tracking_info(self, track_id: str, box: Dict, current_time: float) -> Dict[str, Any]:
-        """
-        获取目标的追踪信息，用于上报（包含速度信息）
-
-        Args:
-            track_id: 跟踪ID
-            box: 目标框
-            current_time: 当前时间戳
-
-        Returns:
-            Dict: 追踪信息字典
-        """
-        # 计算速度和方向
+        # 记录当前追踪目标信息
         speed, angle, direction = self.calculate_speed_and_direction(track_id)
-
-        tracking_info = {
+        self.tracking_last_known_info = {
             'track_id': track_id,
-            'timestamp': current_time,
-            'box': {
-                'x': box['x'],
-                'y': box['y'],
-                'width': box['width'],
-                'height': box['height'],
-                'rotation': box.get('rotation', 0),
-                'score': box['score'],
-                'class': box.get('className', 'motorcycle')
-            },
-            'speed': {
-                'pixels_per_second': round(speed, 2),
-                'angle_degrees': round(angle, 2),
-                'direction': direction
-            },
-            'is_racing': speed >= self.racing_speed_threshold  # 标记是否在飙车
+            'box': best_box,
+            'speed': speed,
+            'angle': angle,
+            'direction': direction,
+            'timestamp': current_time
         }
 
-        return tracking_info
+        from .logger import log_task
+        log_task(f"[模型8追踪模式] 进入追踪模式 - track_id:{track_id}, 置信度:{best_box.get('score', 0):.2f}, 持续时间:{self.tracking_mode_duration}秒")
 
-    def cleanup_old_history(self, current_time: float, max_age: float = 10.0):
+        return True
+
+    def update_tracking_mode(self, motorcycle_boxes: List[Dict], current_time: float) -> Dict[str, Any]:
         """
-        清理过期的追踪历史
+        更新追踪模式状态
+
+        处理追踪模式的所有逻辑：
+        1. 检查追踪目标是否在当前帧中
+        2. 更新追踪状态（追踪中/丢失）
+        3. ✅ 只在丢失状态时检查丢失超时（5秒）
+        4. 判断是否应该上报
 
         Args:
+            motorcycle_boxes: 当前帧的所有摩托车目标框
             current_time: 当前时间戳
-            max_age: 历史记录最大保留时间（秒）
+
+        Returns:
+            Dict: 追踪报告
+            {
+                'state': TrackingState,
+                'should_report': bool,
+                'tracking_info': dict or None,
+                'is_timeout': bool
+            }
         """
-        for track_id in list(self.tracking_history.keys()):
-            # 检查是否超时
-            if track_id in self.last_detection_time_map:
-                time_since_last_detection = current_time - self.last_detection_time_map[track_id]
-                if time_since_last_detection > self.track_timeout:
-                    # 目标超时，删除所有相关数据
-                    del self.tracking_history[track_id]
-                    if track_id in self.last_detection_time_map:
-                        del self.last_detection_time_map[track_id]
-                    if track_id in self.report_time_map:
-                        del self.report_time_map[track_id]
-                    continue
+        from .logger import log_task, log_task_debug
 
-            # 过滤过期的记录
-            self.tracking_history[track_id] = [
-                record for record in self.tracking_history[track_id]
-                if current_time - record['timestamp'] <= max_age
-            ]
+        report = {
+            'state': self.tracking_state,
+            'should_report': False,
+            'tracking_info': None,
+            'is_timeout': False
+        }
 
-            # 如果该track_id没有有效记录，删除
-            if not self.tracking_history[track_id]:
-                del self.tracking_history[track_id]
+        if self.tracking_state == TrackingState.IDLE:
+            return report
 
-                # 同时清理上报时间记录
-                if track_id in self.report_time_map:
-                    del self.report_time_map[track_id]
+        # 计算追踪总持续时间（从追踪开始到现在）
+        elapsed_time = current_time - self.tracking_start_time
+
+        # 在当前帧中查找追踪目标
+        target_box = None
+        for box in motorcycle_boxes:
+            if box.get('track_id') == self.tracking_target_id:
+                target_box = box
+                break
+
+        if target_box is not None:
+            # ✅ 找到目标，更新状态为追踪中
+            if self.tracking_state == TrackingState.LOST:
+                # 从丢失状态恢复
+                log_task(f"[模型8追踪模式] 重新追踪到目标 - track_id:{self.tracking_target_id}")
+
+                self.tracking_state = TrackingState.TRACKING
+                self.tracking_lost_start_time = None  # 清除丢失开始时间
+
+            # 更新最后已知信息
+            speed, angle, direction = self.calculate_speed_and_direction(self.tracking_target_id)
+            self.tracking_last_known_info = {
+                'track_id': self.tracking_target_id,
+                'box': target_box,
+                'speed': speed,
+                'angle': angle,
+                'direction': direction,
+                'timestamp': current_time
+            }
+
+            log_task_debug(f"[模型8追踪模式] 目标追踪中 - track_id:{self.tracking_target_id}, 总时长:{elapsed_time:.2f}秒")
+
+        else:
+            # ✅ 未找到目标，标记为丢失
+            if self.tracking_state == TrackingState.TRACKING:
+                # 从追踪状态转为丢失状态
+                log_task_debug(f"[模型8追踪模式] 目标丢失 - track_id:{self.tracking_target_id}")
+                self.tracking_state = TrackingState.LOST
+                self.tracking_lost_start_time = current_time  # 记录丢失开始时间
+
+            # ✅ 检查丢失时长是否超过限制
+            lost_duration = current_time - self.tracking_lost_start_time
+            if lost_duration >= self.tracking_mode_duration:
+                # 丢失超过5秒，标记为失败
+                self.tracking_state = TrackingState.FAILED
+                report['state'] = TrackingState.FAILED
+                report['is_timeout'] = True
+                report['tracking_info'] = {
+                    'track_id': self.tracking_target_id,
+                    'message': '追踪失败（目标丢失超过5秒）',
+                    'elapsed_time': round(elapsed_time, 2),
+                    'lost_duration': round(lost_duration, 2)
+                }
+
+                log_task(f"[模型8追踪模式] 追踪失败 - track_id:{self.tracking_target_id}, 总时长:{elapsed_time:.2f}秒, 丢失时长:{lost_duration:.2f}秒")
+                return report
+
+            log_task_debug(f"[模型8追踪模式] 目标丢失中 - track_id:{self.tracking_target_id}, 丢失时长:{lost_duration:.2f}秒")
+
+        # 检查是否应该上报（每隔1秒）
+        time_since_last_report = current_time - self.tracking_last_report_time
+        if time_since_last_report >= self.report_interval:
+            report['should_report'] = True
+            self.tracking_last_report_time = current_time
+
+            # 构建追踪信息（使用最后已知信息）
+            if self.tracking_last_known_info:
+                report['tracking_info'] = {
+                    'track_id': self.tracking_last_known_info['track_id'],
+                    'timestamp': current_time,
+                    'box': {
+                        'x': self.tracking_last_known_info['box']['x'],
+                        'y': self.tracking_last_known_info['box']['y'],
+                        'width': self.tracking_last_known_info['box']['width'],
+                        'height': self.tracking_last_known_info['box']['height'],
+                        'score': self.tracking_last_known_info['box']['score'],
+                        'class': self.tracking_last_known_info['box'].get('className', 'motorcycle')
+                    },
+                    'speed': {
+                        'pixels_per_second': round(self.tracking_last_known_info['speed'], 2),
+                        'angle_degrees': round(self.tracking_last_known_info['angle'], 2),
+                        'direction': self.tracking_last_known_info['direction']
+                    },
+                    'tracking_state': self.tracking_state.value,
+                    'elapsed_time': round(elapsed_time, 2)
+                }
+
+        return report
+
+    def reset_tracking_mode(self):
+        """重置追踪模式"""
+        from .logger import log_task_debug
+        log_task_debug(f"[模型8追踪模式] 重置追踪模式 - 之前的track_id:{self.tracking_target_id}, 状态:{self.tracking_state.value}")
+
+        self.tracking_state = TrackingState.IDLE
+        self.tracking_target_id = None
+        self.tracking_start_time = None
+        self.tracking_last_report_time = None
+        self.tracking_last_known_info = None
+        self.tracking_lost_start_time = None  # ✅ 清除丢失开始时间
+
+    def is_in_tracking_mode(self) -> bool:
+        """判断是否处于追踪模式"""
+        return self.tracking_state != TrackingState.IDLE
+
+    def get_tracking_target_id(self) -> Optional[str]:
+        """获取当前追踪的track_id"""
+        return self.tracking_target_id
 
 
 class MotorcycleGatheringStrategyFactory:
@@ -488,8 +537,7 @@ class MotorcycleGatheringStrategyFactory:
                 'use_center_distance': gathering_config.get('use_center_distance', True),
                 'speed_window_size': gathering_config.get('speed_window_size', 2),
                 'report_interval': model_config.get('report_interval', 1.0),
-                'racing_speed_threshold': gathering_config.get('racing_speed_threshold', 20.0),  # 飙车速度阈值
-                'track_timeout': gathering_config.get('track_timeout', 5.0)  # 目标丢失超时时间
+                'tracking_mode_duration': model_config.get('tracking_mode_duration', 5.0)  # 追踪模式持续时间
             }
 
             # 创建管理器

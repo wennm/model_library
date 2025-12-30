@@ -1,20 +1,68 @@
-"""夜间红外摩托车检测模型 - 用于检测飙车聚集场景"""
-from .base_model import BaseModel
+"""夜间红外摩托车检测模型 - 用于检测飙车聚集场景（新追踪模式）"""
+from .base_model import BaseModel, device
 from ultralytics.engine.results import Results
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+from model_library.tools.logger import log_task_error, log_task_debug
+from model_library.utils.sahi_detector import SAHIPlateDetector
 
 
 class InfraredMotorcycleModel(BaseModel):
-    """夜间红外摩托车检测模型"""
+    """夜间红外摩托车检测模型 - 支持SAHI切片推理"""
 
-    def __init__(self, model_path, model_index: int = None, estimated_memory: int = 1000, device_override: str = None):
+    def __init__(self, model_path, enable_sahi=False, sahi_config=None, enable_tracking=True,
+                 model_index=None, estimated_memory=2500, device_override=None, config=0.5):
+        """
+        初始化夜间红外摩托车检测模型，支持SAHI切片推理和跟踪
+
+        Args:
+            model_path: 模型文件路径
+            enable_sahi: 是否启用SAHI切片推理
+            sahi_config: SAHI配置参数
+            enable_tracking: 是否启用跟踪（单张图片建议关闭）
+            model_index: 模型索引，用于GPU分配
+            estimated_memory: 预估显存需求(MB)
+            device_override: 强制指定设备，覆盖自动分配
+            config: 通用置信度阈值（当禁用SAHI时使用）
+        """
+        # 调用父类构造函数，传递GPU分配参数
         super().__init__(model_path, model_index, estimated_memory, device_override)
 
-        # 配置参数
-        self.confidence_threshold = 0.5  # 默认置信度阈值
-        self.enable_sahi = False  # 是否启用SAHI
-        self.sahi_config = None
+        # SAHI和跟踪配置
+        self.enable_sahi = enable_sahi
+        self.enable_tracking = enable_tracking
+
+        # 置信度阈值配置
+        self.confidence_threshold = config  # 使用config作为默认置信度阈值
+
+        # SAHI配置 - 确保是字典类型
+        if sahi_config is None:
+            self.sahi_config = {}
+        elif isinstance(sahi_config, dict):
+            self.sahi_config = sahi_config
+        else:
+            print(f"警告: sahi_config不是字典类型，收到: {type(sahi_config)}，使用默认配置")
+            self.sahi_config = {}
+
+        # 初始化SAHI检测器
+        if self.enable_sahi:
+            try:
+                self.sahi_detector = SAHIPlateDetector(
+                    model_path=model_path,
+                    confidence_threshold=self.sahi_config.get('initial_confidence', 0.7),
+                    device=self.sahi_config.get('device', None)
+                )
+                print("SAHI夜间红外摩托车检测器已启用")
+            except ImportError as e:
+                print(f"SAHI初始化失败，回退到标准YOLO: {e}")
+                self.enable_sahi = False
+            except Exception as e:
+                print(f"SAHI初始化失败，回退到标准YOLO: {e}")
+                self.enable_sahi = False
+        else:
+            print("使用标准YOLO夜间红外摩托车检测")
+
+        print(f"跟踪模式: {'启用' if self.enable_tracking else '禁用（单张图片模式）'}")
 
         # 聚集检测管理器（稍后通过外部方法设置）
         self.gathering_manager = None
@@ -23,18 +71,15 @@ class InfraredMotorcycleModel(BaseModel):
         """设置置信度阈值"""
         self.confidence_threshold = threshold
 
-    def enable_sahi_inference(self, sahi_config: dict = None):
-        """启用SAHI切片推理"""
-        self.enable_sahi = True
-        self.sahi_config = sahi_config
-
     def set_gathering_manager(self, gathering_manager):
         """设置聚集检测管理器"""
         self.gathering_manager = gathering_manager
 
     def post_process(self, results: Results, current_timestamp: float = None) -> List[Dict]:
         """
-        提取检测结果并应用聚集检测
+        提取检测结果并更新追踪历史
+
+        新追踪模式：只负责提取目标框和更新历史，不进行上报判断
 
         Args:
             results: YOLO检测结果
@@ -46,9 +91,9 @@ class InfraredMotorcycleModel(BaseModel):
         # 基础的后处理
         motorcycle_boxes = self._extract_boxes(results)
 
-        # 如果有聚集检测管理器，进行聚集检测
+        # 如果有聚集检测管理器，更新追踪历史
         if self.gathering_manager and motorcycle_boxes:
-            # 更新追踪历史
+            # 更新追踪历史（用于速度计算）
             if current_timestamp is None:
                 current_timestamp = datetime.now().timestamp()
             self.gathering_manager.update_tracking_history(motorcycle_boxes, current_timestamp)
@@ -66,6 +111,11 @@ class InfraredMotorcycleModel(BaseModel):
             List[Dict]: 目标框列表
         """
         from ..tools.logger import log_task_debug
+
+        # 确定使用的置信度阈值：如果启用SAHI，使用initial_confidence，否则使用confidence_threshold
+        threshold = self.confidence_threshold
+        if self.enable_sahi and self.sahi_config:
+            threshold = self.sahi_config.get('initial_confidence', self.confidence_threshold)
 
         results_dict = []
         filtered_count = 0  # 统计被过滤的目标数
@@ -95,7 +145,7 @@ class InfraredMotorcycleModel(BaseModel):
                 confidence = conf[i]
 
                 # 应用置信度阈值过滤
-                if confidence < self.confidence_threshold:
+                if confidence < threshold:
                     filtered_count += 1
                     continue
 
@@ -115,185 +165,44 @@ class InfraredMotorcycleModel(BaseModel):
         # 输出置信度过滤汇总日志
         if filtered_count > 0:
             log_task_debug(
-                f"[模型8验证] 置信度过滤 - 通过:{len(results_dict)}, 过滤:{filtered_count}, 阈值:{self.confidence_threshold:.3f}"
+                f"[模型8验证] 置信度过滤 - 通过:{len(results_dict)}, 过滤:{filtered_count}, 阈值:{threshold:.3f}"
             )
 
         return results_dict
 
-    def detect_gathering_and_get_reports(self, results: Results, current_timestamp: float = None) -> List[Dict[str, Any]]:
+    def track_video(self, source, conf=0.5, stream=False, vid_stride=1, classes: list = None,
+                    imgsz: tuple = (640, 640), verbose: bool = True, iou=0.3, half=True):
         """
-        检测聚集并生成需要上报的追踪信息
+        重写视频跟踪方法，支持SAHI+跟踪和标准YOLO跟踪
 
-        Args:
-            results: YOLO检测结果
-            current_timestamp: 当前时间戳
-
-        Returns:
-            List[Dict]: 需要上报的追踪信息列表
+        注意：对于RTMP实时流，SAHI切片推理性能较差，因此使用标准YOLO跟踪，
+        但会使用SAHI配置的initial_confidence作为置信度阈值
         """
-        if current_timestamp is None:
-            current_timestamp = datetime.now().timestamp()
+        # ✅ 修复：使用self.device而不是全局device变量
+        actual_device = self.device
 
-        # 提取所有摩托车框
-        all_motorcycles = self.post_process(results, current_timestamp)
+        # 如果启用了SAHI，使用SAHI配置的initial_confidence作为置信度
+        actual_conf = conf
+        if self.enable_sahi:
+            actual_conf = self.sahi_config.get('initial_confidence', conf)
+            if verbose:
+                print(f"SAHI模式已启用，使用initial_confidence={actual_conf}作为置信度阈值")
 
-        if not all_motorcycles or not self.gathering_manager:
-            return []
+        # ✅ 添加调试日志
+        log_task_debug(f"[模型8] 开始track_video - device:{actual_device}, conf:{actual_conf}, imgsz:{imgsz}")
 
-        # 检测聚集的摩托车
-        gathering_boxes, gathering_indices = self.gathering_manager.detect_gathering_motorcycles(all_motorcycles)
+        try:
+            # 使用标准YOLO视频跟踪（适用于RTMP实时流）
+            # ✅ 修复：使用self.device而不是全局device变量
+            if classes is not None:
+                results = self.model.track(source, stream=stream, conf=actual_conf, vid_stride=vid_stride, classes=classes,
+                                           imgsz=imgsz, iou=iou, verbose=verbose, half=half, device=actual_device, tracker="botsort_cus.yaml")
+            else:
+                results = self.model.track(source, stream=stream, conf=actual_conf, vid_stride=vid_stride, verbose=verbose,
+                                           iou=iou, half=half, device=actual_device, tracker="botsort_cus.yaml")
 
-        if not gathering_boxes:
-            return []
-
-        # 为每个聚集的目标生成上报信息
-        reports = []
-        for box in gathering_boxes:
-            track_id = box.get('track_id')
-            if track_id and track_id != 'unknown':
-                # 判断是否是首次上报
-                is_first_report = track_id not in self.gathering_manager.report_time_map
-
-                # 判断是否应该上报
-                if self.gathering_manager.should_report(track_id, current_timestamp):
-                    tracking_info = self.gathering_manager.get_tracking_info(
-                        track_id, box, current_timestamp, is_first_report
-                    )
-                    reports.append(tracking_info)
-
-        # 清理过期历史
-        self.gathering_manager.cleanup_old_history(current_timestamp)
-
-        return reports
-
-    def detect_gathering_and_get_frame_report(self, results: Results, current_timestamp: float = None) -> Dict[str, Any]:
-        """
-        检测飙车并生成帧级别的上报信息（同一帧的多个目标在一条消息中）
-
-        检测逻辑：
-        1. 检测聚集的摩托车（3个以上目标）
-        2. 计算聚集目标的速度
-        3. 过滤出速度达到飙车阈值的目标
-        4. 判断是否需要上报
-
-        Args:
-            results: YOLO检测结果
-            current_timestamp: 当前时间戳
-
-        Returns:
-            Dict: 帧级别的飙车报告，包含所有需要上报的目标信息
-            {
-                'timestamp': float,
-                'gathering_count': int,  # 聚集数量
-                'racing_count': int,  # 飙车数量（速度达到阈值）
-                'tracking_infos': List[Dict],  # 该帧所有飙车目标的追踪信息
-                'has_new_reports': bool  # 是否有新的上报目标
-            }
-        """
-        if current_timestamp is None:
-            current_timestamp = datetime.now().timestamp()
-
-        # 提取所有摩托车框
-        all_motorcycles = self.post_process(results, current_timestamp)
-
-        if not all_motorcycles or not self.gathering_manager:
-            return {
-                'timestamp': current_timestamp,
-                'gathering_count': 0,
-                'racing_count': 0,
-                'tracking_infos': [],
-                'has_new_reports': False
-            }
-
-        # 检测聚集的摩托车（先聚集）
-        gathering_boxes, _ = self.gathering_manager.detect_gathering_motorcycles(all_motorcycles)
-
-        if not gathering_boxes:
-            return {
-                'timestamp': current_timestamp,
-                'gathering_count': 0,
-                'racing_count': 0,
-                'tracking_infos': [],
-                'has_new_reports': False
-            }
-
-        # 检测飙车的摩托车（聚集 + 速度阈值）
-        racing_boxes, _ = self.gathering_manager.detect_racing_motorcycles(all_motorcycles, current_timestamp)
-
-        frame_report = {
-            'timestamp': current_timestamp,
-            'gathering_count': len(gathering_boxes),
-            'racing_count': len(racing_boxes),
-            'tracking_infos': [],
-            'has_new_reports': False
-        }
-
-        if not racing_boxes:
-            # 有聚集但没有飙车，不上报
-            return frame_report
-
-        # 为每个飙车的目标生成追踪信息
-        for box in racing_boxes:
-            track_id = box.get('track_id')
-            if track_id and track_id != 'unknown':
-                # 判断是否应该上报
-                should_report = self.gathering_manager.should_report(track_id, current_timestamp)
-
-                if should_report:
-                    frame_report['has_new_reports'] = True
-
-                # 获取追踪信息（包含速度）
-                tracking_info = self.gathering_manager.get_tracking_info(
-                    track_id, box, current_timestamp
-                )
-
-                # 标记这个目标是否需要新上报
-                tracking_info['should_report'] = should_report
-                frame_report['tracking_infos'].append(tracking_info)
-
-        # 清理过期历史
-        self.gathering_manager.cleanup_old_history(current_timestamp)
-
-        return frame_report
-
-    def detect_with_sahi(self, source, conf=0.5, **kwargs):
-        """
-        使用SAHI进行切片推理（如果启用）
-
-        Args:
-            source: 图像源
-            conf: 置信度阈值
-            **kwargs: 其他参数
-
-        Returns:
-            检测结果
-        """
-        if self.enable_sahi and self.sahi_config:
-            # 导入SAHI
-            try:
-                from sahi import AutoDetectionModel
-                from sahi.predict import get_prediction
-
-                # SAHI配置
-                sahi_conf = self.sahi_config
-                initial_confidence = sahi_conf.get('initial_confidence', conf)
-
-                # 使用SAHI进行推理
-                # 注意：这里需要根据实际的SAHI版本进行适配
-                results = self.model.predict(
-                    source,
-                    conf=initial_confidence,
-                    **kwargs
-                )
-                return results
-            except ImportError:
-                print("SAHI未安装，回退到常规推理")
-                self.enable_sahi = False
-                return self.detect_image(source, conf=conf, **kwargs)
-            except Exception as e:
-                print(f"SAHI推理失败: {str(e)}，回退到常规推理")
-                self.enable_sahi = False
-                return self.detect_image(source, conf=conf, **kwargs)
-        else:
-            # 常规推理
-            return self.detect_image(source, conf=conf, **kwargs)
+            log_task_debug(f"[模型8] track_video调用成功")
+            return results
+        except Exception as e:
+            log_task_error(f"[模型8] track_video调用失败: {str(e)}")
+            raise

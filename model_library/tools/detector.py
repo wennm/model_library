@@ -599,8 +599,11 @@ class Detector:
                         f"事故检测处理完成 - 任务ID:{self.task_id}, 总耗时:{accident_time_end - accident_time_start:.3f}秒")
 
             elif self.model_index_8:
-                # 夜间红外摩托车飙车检测模型 - 持续追踪上报（帧级别，多目标在一条消息中）
+                # 夜间红外摩托车飙车检测模型 - 新追踪模式（3车聚集→追踪5秒）
                 for result in results:
+                    # ✅ 修复：在循环开始就定义current_timestamp，确保所有代码路径都能访问
+                    current_timestamp = datetime.now().timestamp()
+
                     # 更新最后帧时间（用于健康监控）
                     self._last_frame_time = time.time()
 
@@ -613,64 +616,120 @@ class Detector:
                     # 每次推理都输出日志（与Model 3保持一致）
                     log_task(f"模型8推理中")
 
-                    # 如果没有检测到目标，直接跳过
+                    # 如果没有检测到目标，也要处理追踪模式更新
                     if len(result) == 0:
-                        log_task_debug(
-                            f"[模型8验证] 当前帧未检测到任何目标"
+                        log_task_debug(f"[模型8追踪] 当前帧未检测到任何目标")
+                        all_motorcycles = []
+                    else:
+                        # 提取所有摩托车目标
+                        all_motorcycles = self.model.post_process([result])
+                        log_task_debug(f"[模型8追踪] 检测到{len(all_motorcycles)}个摩托车")
+
+                    # ========== 新追踪模式逻辑 ==========
+                    tracking_mode_report = None
+
+                    # 检查是否处于追踪模式
+                    if self.gathering_manager.is_in_tracking_mode():
+                        # 更新追踪模式状态
+                        tracking_mode_report = self.gathering_manager.update_tracking_mode(
+                            all_motorcycles, current_timestamp
                         )
-                        continue
 
-                    # 使用模型的帧级别聚集检测方法
-                    current_timestamp = datetime.now().timestamp()
-                    frame_report = self.model.detect_gathering_and_get_frame_report(
-                        result, current_timestamp
-                    )
+                        # 检查是否追踪失败
+                        if tracking_mode_report['is_timeout']:
+                            # 发送追踪失败消息
+                            tracking_failure_info = tracking_mode_report['tracking_info']
 
-                    # 输出验证汇总日志
-                    log_task_debug(
-                        f"[模型8验证汇总] 原始检测数:{len(result)}, 聚集数:{frame_report['gathering_count']}, 飙车数:{frame_report['racing_count']}, 需上报数:{len(frame_report['tracking_infos'])}"
-                    )
+                            log_task(f"[模型8追踪] 追踪失败 - track_id:{tracking_failure_info['track_id']}, 发送失败消息")
 
-                    # 如果没有飙车或者没有需要上报的目标，跳过
-                    if not frame_report['has_new_reports'] or frame_report['racing_count'] == 0:
-                        continue
+                            # 构建追踪失败MQTT消息
+                            current_dt = datetime.fromtimestamp(current_timestamp, BeiJingTime)
+                            date_str = current_dt.strftime("%Y-%m-%d")
+                            timestamp_str = current_dt.strftime("%Y-%m-%d %H:%M:%S.%f")
 
-                    # 构建时间戳
-                    current_dt = datetime.fromtimestamp(frame_report['timestamp'], BeiJingTime)
-                    date_str = current_dt.strftime("%Y-%m-%d")
-                    timestamp_str = current_dt.strftime("%Y-%m-%d %H:%M:%S.%f")
+                            mqtt_message = MQTTMessageFormatter.format_tracking_failure_message(
+                                track_id=tracking_failure_info['track_id'],
+                                elapsed_time=tracking_failure_info['elapsed_time'],
+                                task_id=self.task_id,
+                                timestamp_str=timestamp_str
+                            )
 
-                    # 生成文件名（使用时间戳而不是track_id）
-                    object_name = f"ai/{date_str}/{self.model_name}/{current_dt}.jpg"
+                            # 发送追踪失败消息
+                            log_task_debug(f"发送追踪失败MQTT消息 - track_id:{tracking_failure_info['track_id']}, 主题:{self.topic}")
+                            print(mqtt_message)
+                            mqtt_success = self.mqtt_client.publish_message(self.topic, mqtt_message)
 
-                    gathering_count = frame_report['gathering_count']
-                    racing_count = frame_report['racing_count']
-                    tracking_infos = frame_report['tracking_infos']
+                            # 重置追踪模式
+                            self.gathering_manager.reset_tracking_mode()
+                            continue
 
-                    log_task(f"检测到夜间飙车并上报 - 任务ID:{self.task_id}, 聚集数量:{gathering_count}, 飙车数量:{racing_count}, 追踪目标数:{len(tracking_infos)}")
+                        # 检查是否应该上报
+                        if tracking_mode_report['should_report']:
+                            tracking_info = tracking_mode_report['tracking_info']
 
-                    # 绘制检测框并上传图片
-                    infer_image = result.plot()
-                    _, _ = self.minio_client.upload_image_array(
-                        image_array=infer_image,
-                        object_name=object_name,
-                        image_format='jpg',
-                        quality=85
-                    )
+                            log_task(f"[模型8追踪] 上报追踪信息 - track_id:{tracking_info['track_id']}, 状态:{tracking_info['tracking_state']}, 已用时间:{tracking_info['elapsed_time']}秒")
 
-                    # 使用MQTT格式化器构建摩托车追踪消息（包含所有目标）
-                    mqtt_message = MQTTMessageFormatter.format_motorcycle_frame_message(
-                        object_name=object_name,
-                        frame_report=frame_report,
-                        ori_img_shape=result.orig_shape,
-                        task_id=self.task_id,
-                        timestamp_str=timestamp_str
-                    )
+                            # 构建时间戳
+                            current_dt = datetime.fromtimestamp(current_timestamp, BeiJingTime)
+                            date_str = current_dt.strftime("%Y-%m-%d")
+                            timestamp_str = current_dt.strftime("%Y-%m-%d %H:%M:%S.%f")
 
-                    # 发送到MQTT主题
-                    log_task_debug(f"发送MQTT消息 - 任务ID:{self.task_id}, 聚集数量:{gathering_count}, 主题:{self.topic}")
-                    print(mqtt_message)
-                    mqtt_success = self.mqtt_client.publish_message(self.topic, mqtt_message)
+                            # 生成文件名
+                            object_name = f"ai/{date_str}/{self.model_name}/{current_dt}.jpg"
+
+                            # 绘制检测框并上传图片（即使丢失也上传最后已知位置的图片）
+                            infer_image = result.plot() if len(result) > 0 else result.orig_img
+                            _, _ = self.minio_client.upload_image_array(
+                                image_array=infer_image,
+                                object_name=object_name,
+                                image_format='jpg',
+                                quality=85
+                            )
+
+                            # 构建追踪模式MQTT消息
+                            frame_report = {
+                                'timestamp': current_timestamp,
+                                'gathering_count': 1 if tracking_info['tracking_state'] == 'tracking' else 0,
+                                'racing_count': 1,
+                                'tracking_infos': [tracking_info],
+                                'has_new_reports': True,
+                                'is_tracking_mode': True,  # 标记为追踪模式
+                                'tracking_state': tracking_info['tracking_state']
+                            }
+
+                            mqtt_message = MQTTMessageFormatter.format_motorcycle_tracking_mode_message(
+                                object_name=object_name,
+                                tracking_info=tracking_info,
+                                ori_img_shape=result.orig_shape if len(result) > 0 else (720, 1280),
+                                task_id=self.task_id,
+                                timestamp_str=timestamp_str
+                            )
+
+                            # 发送到MQTT主题
+                            log_task_debug(f"发送追踪模式MQTT消息 - track_id:{tracking_info['track_id']}, 主题:{self.topic}")
+                            print(mqtt_message)
+                            mqtt_success = self.mqtt_client.publish_message(self.topic, mqtt_message)
+
+                    else:
+                        # 不在追踪模式，检测是否满足3车聚集条件
+                        if len(all_motorcycles) >= 3:
+                            # 检测聚集
+                            gathering_boxes, _ = self.gathering_manager.detect_gathering_motorcycles(all_motorcycles)
+
+                            if gathering_boxes:
+                                # 进入追踪模式
+                                success = self.gathering_manager.enter_tracking_mode(gathering_boxes, current_timestamp)
+
+                                if success:
+                                    tracking_target_id = self.gathering_manager.get_tracking_target_id()
+                                    log_task(f"[模型8追踪] 检测到3车聚集，进入追踪模式 - track_id:{tracking_target_id}")
+                                else:
+                                    log_task_debug(f"[模型8追踪] 无法进入追踪模式（无有效track_id）")
+                            else:
+                                log_task_debug(f"[模型8追踪] 检测到{len(all_motorcycles)}个摩托车，但未满足聚集条件")
+                        else:
+                            log_task_debug(f"[模型8追踪] 未满足聚集条件（<3辆摩托车），当前数量:{len(all_motorcycles)}")
+
 
             else:
                 # 其他模型，简单逻辑识别即告警
