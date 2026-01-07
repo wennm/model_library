@@ -36,19 +36,27 @@ model:
   3:
     model_name: "accident"
     class_path: "model_library.model.track_accident.TrackAccident"
+    model_path: "weight/model3_yolo12x_obb_8class_accident_balanced_v1.04.pt"    # 事故检测_20260107
     # model_path: "weight/accident_with_person_new1111night.pt"    # 事故检测_20251112
-    model_path: "weight/best_accident_baseyolox.pt"    # 事故检测_20251112
+    # model_path: "weight/best_accident_baseyolox.pt"    # 事故检测_20251112
     # model_path: "weight/accident_with_person.pt"    # 事故检测_20251111
     # model_path: "weight/yolo_accident_obb_v2.pt"    # 事故检测_20251023
     # model_path: "weight/yolo_accident_obb_havegame_nomoni.pt"    # 事故检测_20251024
-    classes: [0, 1]
+    classes: [0, 1 ,2 ,3,4,5,6,7]
     config: 0.4  # 通用置信度阈值（作为后备）
     time_step: 60  # 消息推送的间隔
     imgsz: 1  # 1 代表模型采用原图大小
     # 分类别置信度阈值配置
     class_confidence:
-      accident: 0.5    # 事故检测阈值 (class=0)
-      pedestrian: 0.5  # 行人检测阈值 (class=1)
+      # 核心类别（主要检测目标）
+      accident: 0.5           # 0: 交通事故检测阈值 [22.97%]
+      pedestrian: 0.4         # 1: 行人检测阈值 [39.17%]
+      motorcycle: 0.4         # 2: 摩托车检测阈值 [5.19%] - 稍低以提高召回率
+      car: 0.5                # 3: 汽车检测阈值 [16.06%]
+      motorcycle_accident: 0.2  # 4: 摩托车事故检测阈值 [1.71%] - 稍高以减少误报
+      large_vehicle: 0.5       # 5: 大型车辆检测阈值 [3.27%]
+      traffic_police: 0.4     # 6: 交警检测阈值 [9.08%] - 稍低以提高召回率
+      police_motorcycle: 0.5  # 7: 警用摩托检测阈值 [2.54%]
     # 事故验证策略配置
     verification_strategy: "overlap"  # 可选: overlap, distance, combined, none
     verification_config:
@@ -66,9 +74,16 @@ model:
     vlm_verification:
       enabled: true  # 开启多模态辅助验证
       stream: true  # 启用流式输出（更快响应，支持早期退出）
-      # prompt: "图中红色框选区域内是否发生了车辆碰撞或交通事故？请回答是或否。"
-      prompt: "图中红色框选区域内是否发生了车辆碰撞或交通事故？疑似剐蹭也算，如两辆车贴得很近，周围有两个以上的人在查看车辆，一定要有人。请只回答是或否。"
-      # prompt: "这是无人机视角下的图片，图中红色框选区域内是否有两个或以上的人。请只回答是或否。"  #后备prompt
+
+      # Prompt1: 用于普通事故检测 (class=0: accident)
+      prompt1: "图中红色框选区域内是否发生了车辆碰撞或交通事故？疑似剐蹭也算，如两辆车贴得很近，周围有两个以上的人在查看车辆，一定要有人。请只回答是或否。"
+
+      # Prompt2: 用于摩托车事故检测 (class=4: motorcycle accident)
+      prompt2: "图中红色框选区域内是否发生了摩托车(电瓶车)车辆碰撞或交通事故？疑似剐蹭也算，如摩托车与轿车贴得很近，周围有两个以上的人在查看车辆，一定要有人。请只回答是或否。"
+
+      # 兼容旧配置（如果只配置了prompt，则作为prompt1使用）
+      # prompt: "图中红色框选区域内是否发生了车辆碰撞或交通事故？疑似剐蹭也算，如两辆车贴得很近，周围有两个以上的人在查看车辆，一定要有人。请只回答是或否。"
+
       # model: "Qwen/Qwen2.5-VL-72B-Instruct" # 可选：覆盖全局配置的模型
       timeout: 5  # API 超时时间（秒）
       stream_timeout: 8  # 流式接收超时时间（秒），超时后降级使用算法验证结果

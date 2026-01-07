@@ -10,18 +10,60 @@ class TrackAccident(BaseModel):
         self.track_id = 0
         self.track_dict = {}
 
-        # 分类阈值配置
+        # 分类阈值配置（8个类别）
         self.class_thresholds = {
-            0: 0.4,  # 事故类别默认阈值
-            1: 0.4   # 行人类别默认阈值
+            0: 0.5,  # 0: accident - 交通事故
+            1: 0.5,  # 1: pedestrian - 行人
+            2: 0.4,  # 2: motorcycle - 摩托车
+            3: 0.5,  # 3: car - 汽车
+            4: 0.6,  # 4: motorcycle accident - 摩托车事故
+            5: 0.5,  # 5: large vehicle - 大型车辆
+            6: 0.4,  # 6: Traffic Police - 交警
+            7: 0.5,  # 7: police motorcycle - 警用摩托
         }
 
-    def set_class_thresholds(self, accident_threshold=None, pedestrian_threshold=None):
-        """设置分类别的检测阈值"""
-        if accident_threshold is not None:
-            self.class_thresholds[0] = accident_threshold
-        if pedestrian_threshold is not None:
-            self.class_thresholds[1] = pedestrian_threshold
+    def set_class_thresholds(self, accident_threshold=None, pedestrian_threshold=None,
+                            motorcycle_threshold=None, car_threshold=None,
+                            motorcycle_accident_threshold=None, large_vehicle_threshold=None,
+                            traffic_police_threshold=None, police_motorcycle_threshold=None,
+                            thresholds_dict=None):
+        """
+        设置分类别的检测阈值（支持8个类别）
+
+        Args:
+            accident_threshold: 0: 交通事故检测阈值
+            pedestrian_threshold: 1: 行人检测阈值
+            motorcycle_threshold: 2: 摩托车检测阈值
+            car_threshold: 3: 汽车检测阈值
+            motorcycle_accident_threshold: 4: 摩托车事故检测阈值
+            large_vehicle_threshold: 5: 大型车辆检测阈值
+            traffic_police_threshold: 6: 交警检测阈值
+            police_motorcycle_threshold: 7: 警用摩托检测阈值
+            thresholds_dict: 字典形式批量设置，会覆盖单独参数
+        """
+        # 如果提供了字典，优先使用字典
+        if thresholds_dict:
+            for class_id, threshold in thresholds_dict.items():
+                if class_id in self.class_thresholds:
+                    self.class_thresholds[class_id] = threshold
+        else:
+            # 使用单独参数设置
+            if accident_threshold is not None:
+                self.class_thresholds[0] = accident_threshold
+            if pedestrian_threshold is not None:
+                self.class_thresholds[1] = pedestrian_threshold
+            if motorcycle_threshold is not None:
+                self.class_thresholds[2] = motorcycle_threshold
+            if car_threshold is not None:
+                self.class_thresholds[3] = car_threshold
+            if motorcycle_accident_threshold is not None:
+                self.class_thresholds[4] = motorcycle_accident_threshold
+            if large_vehicle_threshold is not None:
+                self.class_thresholds[5] = large_vehicle_threshold
+            if traffic_police_threshold is not None:
+                self.class_thresholds[6] = traffic_police_threshold
+            if police_motorcycle_threshold is not None:
+                self.class_thresholds[7] = police_motorcycle_threshold
 
     
     def post_process(self,results:Results)->list:

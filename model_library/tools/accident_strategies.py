@@ -303,7 +303,7 @@ class AccidentVerificationManager:
 
     def apply_class_confidence_thresholds(self, model) -> bool:
         """
-        应用分类别置信度阈值到模型
+        应用分类别置信度阈值到模型（支持8个类别）
 
         Args:
             model: 要设置阈值的模型
@@ -313,15 +313,42 @@ class AccidentVerificationManager:
         """
         try:
             if hasattr(model, 'set_class_thresholds') and self.class_confidence:
-                accident_threshold = self.class_confidence.get('accident')
-                pedestrian_threshold = self.class_confidence.get('pedestrian')
-                model.set_class_thresholds(
-                    accident_threshold=accident_threshold,
-                    pedestrian_threshold=pedestrian_threshold
-                )
-                return True
+                # 构建阈值字典（使用class_id作为键）
+                thresholds_dict = {}
+
+                # 核心类别
+                if 'accident' in self.class_confidence:
+                    thresholds_dict[0] = self.class_confidence['accident']
+                if 'pedestrian' in self.class_confidence:
+                    thresholds_dict[1] = self.class_confidence['pedestrian']
+
+                # 车辆相关类别
+                if 'motorcycle' in self.class_confidence:
+                    thresholds_dict[2] = self.class_confidence['motorcycle']
+                if 'car' in self.class_confidence:
+                    thresholds_dict[3] = self.class_confidence['car']
+
+                # 事故相关类别
+                if 'motorcycle_accident' in self.class_confidence:
+                    thresholds_dict[4] = self.class_confidence['motorcycle_accident']
+                if 'large_vehicle' in self.class_confidence:
+                    thresholds_dict[5] = self.class_confidence['large_vehicle']
+
+                # 执法相关类别
+                if 'traffic_police' in self.class_confidence:
+                    thresholds_dict[6] = self.class_confidence['traffic_police']
+                if 'police_motorcycle' in self.class_confidence:
+                    thresholds_dict[7] = self.class_confidence['police_motorcycle']
+
+                # 使用字典形式批量设置阈值
+                if thresholds_dict:
+                    model.set_class_thresholds(thresholds_dict=thresholds_dict)
+                    return True
             return False
-        except Exception:
+        except Exception as e:
+            # 记录错误但不中断程序
+            import logging
+            logging.error(f"应用分类阈值失败: {str(e)}")
             return False
 
     def plot_verified_accidents_only(self, result, verified_accident_items):

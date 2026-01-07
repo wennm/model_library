@@ -14,7 +14,21 @@ class VLMVerifier:
         if not self.enabled:
             return
 
-        self.prompt = config.get('prompt', "这张图片中是否发生了交通事故？请只回答是或否。")
+        # 支持多个prompt配置（prompt1用于普通事故，prompt2用于摩托车事故）
+        # 兼容旧配置：如果只配置了prompt，则作为prompt1使用
+        if 'prompt' in config:
+            # 旧配置兼容
+            self.prompts = {
+                'prompt1': config.get('prompt', "这张图片中是否发生了交通事故？请只回答是或否。"),
+                'prompt2': config.get('prompt2', config.get('prompt', "这张图片中是否发生了交通事故？请只回答是或否。"))
+            }
+        else:
+            # 新配置
+            self.prompts = {
+                'prompt1': config.get('prompt1', "这张图片中是否发生了交通事故？请只回答是或否。"),
+                'prompt2': config.get('prompt2', "这张图片中是否发生了交通事故？请只回答是或否。")
+            }
+
         self.timeout = config.get('timeout', 10.0)
         self.stream = config.get('stream', True)  # 是否使用流式输出，默认开启
         self.stream_timeout = config.get('stream_timeout', 10.0)  # 流式接收超时时间
@@ -173,16 +187,25 @@ class VLMVerifier:
 
         return result[0], None
 
-    def verify_accident(self, image: np.ndarray) -> bool:
+    def verify_accident(self, image: np.ndarray, prompt_type='prompt1') -> bool:
         """
         使用 VLM 验证事故（支持流式/非流式，带早期退出和超时降级）
-        Returns: True 表示确认为事故，False 表示不是事故
+
+        Args:
+            image: 图像数组
+            prompt_type: 使用的prompt类型 ('prompt1' 或 'prompt2')
+
+        Returns:
+            True 表示确认为事故，False 表示不是事故
         """
         if not self.enabled:
             return True # 如果未启用，默认通过
 
         if image is None or image.size == 0:
             return False
+
+        # 获取对应的prompt
+        self.prompt = self.prompts.get(prompt_type, self.prompts['prompt1'])
 
         # 使用配置中的总超时时间
         total_timeout = self.total_timeout
