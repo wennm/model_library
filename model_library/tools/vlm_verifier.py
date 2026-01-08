@@ -11,14 +11,18 @@ class VLMVerifier:
 
     def __init__(self, config: Dict[str, Any], global_modelscope_conf: Dict[str, Any] = None):
         self.enabled = config.get('enabled', False)
-        if not self.enabled:
-            return
 
-        self.prompt = config.get('prompt', "这张图片中是否发生了交通事故？请只回答是或否。")
+        # 支持多个prompt：prompt1(普通/大型车辆), prompt2(摩托车)
+        self.prompt1 = config.get('prompt1', config.get('prompt', "这张图片中是否发生了交通事故？请只回答是或否。"))
+        self.prompt2 = config.get('prompt2', self.prompt1)  # 默认使用prompt1
+        self.current_prompt = self.prompt1  # 当前使用的prompt
         self.timeout = config.get('timeout', 10.0)
         self.stream = config.get('stream', True)  # 是否使用流式输出，默认开启
         self.stream_timeout = config.get('stream_timeout', 10.0)  # 流式接收超时时间
         self.total_timeout = config.get('total_timeout', 15.0)  # 硬性总超时时间
+
+        if not self.enabled:
+            return
 
         # 初始化配置列表（优先级从高到低）
         self.configs = []
@@ -202,7 +206,35 @@ class VLMVerifier:
             return self._verify_with_stream(image, overall_start_time, total_timeout)
         else:
             return self._verify_without_stream(image, overall_start_time, total_timeout)
-    
+
+    def set_prompt_by_accident_type(self, accident_type: str):
+        """
+        根据事故类型设置使用的prompt
+
+        Args:
+            accident_type: 事故类型 ("motorcycle", "large_vehicle", "normal")
+        """
+        if accident_type == "motorcycle":
+            self.current_prompt = self.prompt2
+        else:  # large_vehicle or normal
+            self.current_prompt = self.prompt1
+
+    def verify_accident_with_type(self, image: np.ndarray, accident_type: str) -> bool:
+        """
+        使用指定的事故类型验证事故（自动选择prompt）
+
+        Args:
+            image: 图像数组
+            accident_type: 事故类型 ("motorcycle", "large_vehicle", "normal")
+
+        Returns:
+            bool: True表示确认为事故，False表示不是事故
+        """
+        # 设置对应的prompt
+        self.set_prompt_by_accident_type(accident_type)
+        # 执行验证
+        return self.verify_accident(image)
+
     def _verify_with_stream(self, image: np.ndarray, overall_start_time: float, total_timeout: float) -> bool:
         """流式验证（支持早期退出和配置切换）"""
         start_time = time.time()
@@ -242,7 +274,7 @@ class VLMVerifier:
                             {
                                 "role": "user",
                                 "content": [
-                                    {"type": "text", "text": self.prompt},
+                                    {"type": "text", "text": self.current_prompt},
                                     {"type": "image_url", "image_url": {"url": image_url}}
                                 ]
                             }
@@ -364,7 +396,7 @@ class VLMVerifier:
                             {
                                 "role": "user",
                                 "content": [
-                                    {"type": "text", "text": self.prompt},
+                                    {"type": "text", "text": self.current_prompt},
                                     {"type": "image_url", "image_url": {"url": image_url}}
                                 ]
                             }

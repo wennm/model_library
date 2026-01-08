@@ -36,19 +36,20 @@ model:
   3:
     model_name: "accident"
     class_path: "model_library.model.track_accident.TrackAccident"
-    # model_path: "weight/accident_with_person_new1111night.pt"    # 事故检测_20251112
-    model_path: "weight/best_accident_baseyolox.pt"    # 事故检测_20251112
-    # model_path: "weight/accident_with_person.pt"    # 事故检测_20251111
-    # model_path: "weight/yolo_accident_obb_v2.pt"    # 事故检测_20251023
-    # model_path: "weight/yolo_accident_obb_havegame_nomoni.pt"    # 事故检测_20251024
-    classes: [0, 1]
+    model_path: "weight/model3_yolo12x_obb_7class_accident_balanced_v1.0.pt"    # 事故检测新模型（支持7类目标）
+    classes: [0, 1, 2, 3, 4, 5, 6]  # 7类目标：0-事故 1-行人 2-摩托车 3-汽车 4-大型车辆 5-交警 6-警用摩托
     config: 0.4  # 通用置信度阈值（作为后备）
     time_step: 60  # 消息推送的间隔
     imgsz: 1  # 1 代表模型采用原图大小
-    # 分类别置信度阈值配置
+    # 分类别置信度阈值配置（支持7类目标独立调整）
     class_confidence:
-      accident: 0.5    # 事故检测阈值 (class=0)
-      pedestrian: 0.5  # 行人检测阈值 (class=1)
+      accident: 0.6           # 0-事故检测阈值
+      pedestrian: 0.55         # 1-行人检测阈值
+      motorcycle: 0.2        # 2-摩托车检测阈值
+      car: 0.5                # 3-汽车检测阈值
+      large_vehicle: 0.4      # 4-大型车辆检测阈值
+      traffic_police: 0.6     # 5-交警检测阈值
+      police_motorcycle: 0.8  # 6-警用摩托检测阈值
     # 事故验证策略配置
     verification_strategy: "overlap"  # 可选: overlap, distance, combined, none
     verification_config:
@@ -66,9 +67,10 @@ model:
     vlm_verification:
       enabled: true  # 开启多模态辅助验证
       stream: true  # 启用流式输出（更快响应，支持早期退出）
-      # prompt: "图中红色框选区域内是否发生了车辆碰撞或交通事故？请回答是或否。"
-      prompt: "图中红色框选区域内是否发生了车辆碰撞或交通事故？疑似剐蹭也算，如两辆车贴得很近，周围有两个以上的人在查看车辆，一定要有人。请只回答是或否。"
-      # prompt: "这是无人机视角下的图片，图中红色框选区域内是否有两个或以上的人。请只回答是或否。"  #后备prompt
+      # prompt1: 普通事故/大型车辆事故验证prompt
+      prompt1: "图中红色框选区域内是否发生了车辆碰撞或交通事故？疑似剐蹭也算，如两辆车贴得很近，周围有两个以上的人在查看车辆，一定要有人。请只回答是或否。"
+      # prompt2: 摩托车事故专用验证prompt
+      prompt2: "图中红色框选区域内是否发生了摩托车(电瓶车)车辆碰撞或交通事故？疑似剐蹭也算，如摩托车与轿车贴得很近，周围有两个以上的人在查看车辆，一定要有人。请只回答是或否。"
       # model: "Qwen/Qwen2.5-VL-72B-Instruct" # 可选：覆盖全局配置的模型
       timeout: 5  # API 超时时间（秒）
       stream_timeout: 8  # 流式接收超时时间（秒），超时后降级使用算法验证结果
@@ -103,7 +105,7 @@ model:
   5:
     model_name: "car"
     class_path: "model_library.model.car_model.CarModel"
-    model_path: "weight/yolo_visdrone.pt"    # 车辆检测
+    model_path: "weight/yolo11x-visdrone.pt"    # 车辆检测_20260108
     config: 0.5
     classes: [3,4,5,8]
     imgsz: 0  # 0 代表模型不采用原图大小

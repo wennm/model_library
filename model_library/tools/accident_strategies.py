@@ -303,7 +303,7 @@ class AccidentVerificationManager:
 
     def apply_class_confidence_thresholds(self, model) -> bool:
         """
-        应用分类别置信度阈值到模型
+        应用分类别置信度阈值到模型（支持7类目标）
 
         Args:
             model: 要设置阈值的模型
@@ -313,11 +313,24 @@ class AccidentVerificationManager:
         """
         try:
             if hasattr(model, 'set_class_thresholds') and self.class_confidence:
+                # 获取所有7类目标的阈值配置
                 accident_threshold = self.class_confidence.get('accident')
                 pedestrian_threshold = self.class_confidence.get('pedestrian')
+                motorcycle_threshold = self.class_confidence.get('motorcycle')
+                car_threshold = self.class_confidence.get('car')
+                large_vehicle_threshold = self.class_confidence.get('large_vehicle')
+                traffic_police_threshold = self.class_confidence.get('traffic_police')
+                police_motorcycle_threshold = self.class_confidence.get('police_motorcycle')
+
+                # 应用阈值设置
                 model.set_class_thresholds(
                     accident_threshold=accident_threshold,
-                    pedestrian_threshold=pedestrian_threshold
+                    pedestrian_threshold=pedestrian_threshold,
+                    motorcycle_threshold=motorcycle_threshold,
+                    car_threshold=car_threshold,
+                    large_vehicle_threshold=large_vehicle_threshold,
+                    traffic_police_threshold=traffic_police_threshold,
+                    police_motorcycle_threshold=police_motorcycle_threshold
                 )
                 return True
             return False
@@ -465,7 +478,101 @@ class AccidentStrategyFactory:
             # 使用默认配置
             return cls.create_manager('overlap', {'overlap_threshold': 0.3})
 
-    @classmethod
-    def get_available_strategies(cls) -> List[str]:
-        """获取所有可用的策略名称"""
-        return list(cls._strategies.keys())
+
+def classify_accident_type(
+    accident_box: Dict[str, Any],
+    all_boxes: List[Dict[str, Any]],
+    overlap_threshold: float = 0.3
+) -> Dict[str, Any]:
+    """
+    根据事故框内的目标类型分类事故类型（摩托车事故/大型车辆事故/普通事故）
+
+    Args:
+        accident_box: 事故目标框 (xywhr格式)
+        all_boxes: 所有检测到的目标框列表
+        overlap_threshold: 判断重叠的阈值，默认0.3
+
+    Returns:
+        dict: 事故类型信息，包含:
+            - accident_type: 事故类型 ("motorcycle", "large_vehicle", "normal")
+            - has_police: 是否有交警 (bool)
+            - message: MQTT消息文本
+    """
+    # 提取事故框参数
+    accident_xywhr = [
+        accident_box['x'],
+        accident_box['y'],
+        accident_box['width'],
+        accident_box['height'],
+        accident_box['rotation']
+    ]
+
+    # 统计事故框内的各类目标
+    has_motorcycle = False  # class=2
+    has_large_vehicle = False  # class=4
+    has_police = False  # class=5
+    police_count = 0
+    pedestrian_count = 0  # class=1
+
+    # 检查每个目标框是否与事故框重叠
+    for box in all_boxes:
+        class_id = box.get('classed', box.get('class_id', -1))
+
+        # 跳过事故框本身
+        if class_id == 0:
+            continue
+
+        # 构建目标框的xywhr格式
+        box_xywhr = [
+            box['x'],
+            box['y'],
+            box['width'],
+            box['height'],
+            box['rotation']
+        ]
+
+        # 使用GeometryUtils判断重叠
+        # 先将两个框转换为多边形
+        poly1 = GeometryUtils.convert_xywhr_to_polygon(*accident_xywhr)
+        poly2 = GeometryUtils.convert_xywhr_to_polygon(*box_xywhr)
+
+        # 计算重叠面积
+        intersection = poly1.intersection(poly2)
+        if intersection.area > 0:
+            overlap_ratio = intersection.area / poly2.area
+
+            if overlap_ratio >= overlap_threshold:
+                # 目标在事故框内
+                if class_id == 2:  # 摩托车
+                    has_motorcycle = True
+                elif class_id == 4:  # 大型车辆
+                    has_large_vehicle = True
+                elif class_id == 5:  # 交警
+                    has_police = True
+                    police_count += 1
+                elif class_id == 1:  # 行人
+                    pedestrian_count += 1
+
+    # 判断事故类型
+    accident_type = "normal"
+    if has_motorcycle:
+        accident_type = "motorcycle"
+    elif has_large_vehicle:
+        accident_type = "large_vehicle"
+
+    # 生成message文本
+    police_status = "有交警" if has_police else "无交警"
+    if accident_type == "motorcycle":
+        message = f"发生摩托车交通事故,{police_status}"
+    elif accident_type == "large_vehicle":
+        message = f"发生大型车辆交通事故,{police_status}"
+    else:  # normal
+        message = f"发生普通交通事故,{police_status}"
+
+    return {
+        "accident_type": accident_type,
+        "has_police": has_police,
+        "police_count": police_count,
+        "pedestrian_count": pedestrian_count,
+        "message": message
+    }

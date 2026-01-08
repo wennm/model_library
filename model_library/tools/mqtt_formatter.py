@@ -11,10 +11,11 @@ class MQTTMessageFormatter:
         accident_item: Dict[str, Any],
         ori_img_shape: tuple,
         task_id: str,
-        timestamp_str: str
+        timestamp_str: str,
+        message: str = None
     ) -> Dict[str, Any]:
         """
-        格式化事故检测MQTT消息 - 保持与detector.py:151-162完全一致
+        格式化事故检测MQTT消息 - 支持事故类型message字段
 
         Args:
             object_name: 事故图片存储对象名
@@ -22,6 +23,7 @@ class MQTTMessageFormatter:
             ori_img_shape: 原始图像尺寸
             task_id: 任务ID
             timestamp_str: 时间戳字符串
+            message: 可选的消息字段，描述事故类型和详细信息
 
         Returns:
             dict: 事故检测MQTT消息
@@ -38,6 +40,10 @@ class MQTTMessageFormatter:
         mqtt_message["imageInfo"]["imageSize"] = ""
         mqtt_message["imageInfo"]["task_id"] = task_id
         mqtt_message["imageInfo"]["timestamp"] = timestamp_str
+
+        # 添加message字段（如果提供）
+        if message:
+            mqtt_message["imageInfo"]["message"] = message
 
         return mqtt_message
 

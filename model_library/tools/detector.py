@@ -152,9 +152,9 @@ class Detector:
         return cls._instance_count
 
   
-    async def _save_and_publish_accident(self, result, accident_item, object_name, ori_img_shape, timestamp_str):
+    async def _save_and_publish_accident(self, result, accident_item, object_name, ori_img_shape, timestamp_str, message=None):
         """
-        保存事故图像并发布MQTT消息
+        保存事故图像并发布MQTT消息（支持事故类型message）
 
         Args:
             result: YOLO检测结果
@@ -162,6 +162,7 @@ class Detector:
             object_name: 存储对象名
             ori_img_shape: 原始图像尺寸
             timestamp_str: 时间戳字符串
+            message: 可选的事故类型描述消息
         """
         try:
             # 使用策略工厂的绘制方法，只绘制验证后的真实事故框，不绘制行人框
@@ -173,13 +174,14 @@ class Detector:
                 quality=85
             )
 
-            # 使用MQTT格式化器构建消息
+            # 使用MQTT格式化器构建消息（传递message参数）
             mqtt_message = MQTTMessageFormatter.format_accident_message(
                 object_name=object_name,
                 accident_item=accident_item,
                 ori_img_shape=ori_img_shape,
                 task_id=self.task_id,
-                timestamp_str=timestamp_str
+                timestamp_str=timestamp_str,
+                message=message
             )
             # 确保objNum使用len(result)以保持原有逻辑
             mqtt_message["imageInfo"]["objNum"] = len(result)
@@ -516,16 +518,33 @@ class Detector:
                     ori_img_shape = result.orig_shape
                     if not results_list:
                         continue
-                    # 分离不同类别的检测结果
+                    # 分离不同类别的检测结果（支持7类目标）
                     accident_boxes = []  # class=0 (accident)
                     pedestrian_boxes = []  # class=1 (pedestrian)
+                    motorcycle_boxes = []  # class=2 (motorcycle)
+                    car_boxes = []  # class=3 (car)
+                    large_vehicle_boxes = []  # class=4 (large vehicle)
+                    traffic_police_boxes = []  # class=5 (traffic police)
+                    police_motorcycle_boxes = []  # class=6 (police motorcycle)
 
                     for result_item in results_list:
+                        class_id = result_item.get('classed', result_item.get('class_id', -1))
                         class_name = result_item.get('className', '')
-                        if class_name == 'accident':  # class=0
+
+                        if class_id == 0 or class_name == 'accident':  # class=0
                             accident_boxes.append(result_item)
-                        elif class_name == 'pedestria':  # class=1
+                        elif class_id == 1 or class_name == 'pedestria':  # class=1
                             pedestrian_boxes.append(result_item)
+                        elif class_id == 2 or class_name == 'motorcycle':  # class=2
+                            motorcycle_boxes.append(result_item)
+                        elif class_id == 3 or class_name == 'car':  # class=3
+                            car_boxes.append(result_item)
+                        elif class_id == 4 or class_name == 'large_vehicle':  # class=4
+                            large_vehicle_boxes.append(result_item)
+                        elif class_id == 5 or class_name == 'traffic_police':  # class=5
+                            traffic_police_boxes.append(result_item)
+                        elif class_id == 6 or class_name == 'police_motorcycle':  # class=6
+                            police_motorcycle_boxes.append(result_item)
 
                     # 如果没有检测到事故，跳过
                     if not accident_boxes:
@@ -579,21 +598,51 @@ class Detector:
                         result_item['accident_car_xyxy'] = accident_obb_list
                         log_task_debug(f"事故车辆识别完成 - 任务ID:{self.task_id}, 事件ID:{id}, 车辆数:{accident_car}, 耗时:{car_time_end - car_time_start:.3f}秒")
 
-                        # VLM 多模态验证
+                        # 事故类型分类（摩托车/大型车辆/普通）
+                        from model_library.tools.accident_strategies import classify_accident_type
+                        all_boxes = (accident_boxes + pedestrian_boxes + motorcycle_boxes +
+                                   car_boxes + large_vehicle_boxes + traffic_police_boxes +
+                                   police_motorcycle_boxes)
+                        accident_type_info = classify_accident_type(result_item, all_boxes)
+                        accident_type = accident_type_info['accident_type']
+                        accident_message = accident_type_info['message']
+                        log_task_debug(f"事故类型分类完成 - 任务ID:{self.task_id}, 事件ID:{id}, "
+                                     f"类型:{accident_type}, "
+                                     f"有交警:{accident_type_info['has_police']}, "
+                                     f"行人:{accident_type_info['pedestrian_count']}, "
+                                     f"交警:{accident_type_info['police_count']}, "
+                                     f"消息:{accident_message}")
+
+                        # 一步验证：检查事故框内行人+交警数量是否≥2
+                        pedestrian_police_count = (accident_type_info['pedestrian_count'] +
+                                                  accident_type_info['police_count'])
+                        log_task_debug(f"一步验证 - 任务ID:{self.task_id}, 事件ID:{id}, "
+                                     f"行人+交警数量:{pedestrian_police_count}")
+
+                        if pedestrian_police_count < 2:
+                            log_task(f"一步验证失败，行人+交警数量不足2个，跳过上报 - 任务ID:{self.task_id}, 事件ID:{id}, 数量:{pedestrian_police_count}")
+                            continue
+
+                        log_task(f"一步验证通过 - 任务ID:{self.task_id}, 事件ID:{id}, 行人+交警数量:{pedestrian_police_count}")
+
+                        # 二步验证：VLM 多模态验证（根据事故类型使用不同的prompt）
                         if self.vlm_verifier and self.vlm_verifier.enabled:
                             vlm_start_time = time.time()
                             # 使用绘制了事故框的图片进行验证，帮助大模型聚焦
                             vlm_image = self.verification_manager.plot_verified_accidents_only(result, [result_item])
-                            is_confirmed = self.vlm_verifier.verify_accident(vlm_image)
+                            # 根据事故类型使用对应的prompt进行验证
+                            is_confirmed = self.vlm_verifier.verify_accident_with_type(vlm_image, accident_type)
 
-                            log_task_debug(f"VLM验证结果: {is_confirmed}, 耗时:{time.time() - vlm_start_time:.3f}秒")
+                            log_task_debug(f"VLM验证结果(类型:{accident_type}): {is_confirmed}, 耗时:{time.time() - vlm_start_time:.3f}秒")
 
                             if not is_confirmed:
-                                log_task(f"VLM未确认事故，跳过上报 - 任务ID:{self.task_id}, 事件ID:{id}")
+                                log_task(f"VLM未确认事故，跳过上报 - 任务ID:{self.task_id}, 事件ID:{id}, 事故类型:{accident_type}")
                                 continue
 
-                        # 保存和上报事故信息
-                        await self._save_and_publish_accident(result, result_item, object_name, ori_img_shape, timestamp_str)
+                            log_task(f"VLM验证通过 - 任务ID:{self.task_id}, 事件ID:{id}, 事故类型:{accident_type}")
+
+                        # 保存和上报事故信息（传递message参数）
+                        await self._save_and_publish_accident(result, result_item, object_name, ori_img_shape, timestamp_str, accident_message)
                     accident_time_end = time.time()
                     log_task_debug(
                         f"事故检测处理完成 - 任务ID:{self.task_id}, 总耗时:{accident_time_end - accident_time_start:.3f}秒")
