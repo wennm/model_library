@@ -65,6 +65,9 @@ class Detector:
         self.gathering_manager = None
         self.model_index_8 = self.model_index == 8
 
+        # 初始化行人检测模型标志（仅用于模型9）
+        self.model_index_9 = self.model_index == 9
+
         log_task_debug(f"获取模型实例 - 任务ID:{task_id}, 模型:{self.model_name}")
         self.model = model_manager.get_model(self.model_index, task_id)
 
@@ -780,6 +783,80 @@ class Detector:
                         else:
                             log_task_debug(f"[模型8追踪] 未满足聚集条件（<{min_count}辆摩托车），当前数量:{len(all_motorcycles)}")
 
+            elif self.model_index_9:
+                # 行人检测模型 - 检测人群聚集并报警
+                for result in results:
+                    # 更新最后帧时间（用于健康监控）
+                    self._last_frame_time = time.time()
+
+                    # 检查停止请求
+                    if await self.check_stop():
+                        log_task(f"模型9收到停止请求，退出推理循环 - 任务ID:{self.task_id}")
+                        self._should_stop = True
+                        break
+
+                    # 每次推理都输出日志
+                    log_task(f"模型9推理中")
+
+                    # 如果没有检测到目标，继续下一帧
+                    if len(result) == 0:
+                        log_task_debug(f"[模型9] 当前帧未检测到任何目标")
+                        continue
+
+                    # 提取检测结果
+                    detections = self.model.post_process([result])
+
+                    if not detections:
+                        continue
+
+                    # 获取人群聚集信息（在第一个检测框中）
+                    gathering_info = detections[0].get('gathering_info', {})
+
+                    # 检查是否应该上报（基于状态机逻辑）
+                    if not gathering_info.get('should_report', False):
+                        log_task_debug(f"[模型9] 不满足上报条件 - 当前数量:{gathering_info.get('total_count', 0)}, 状态:{gathering_info.get('state', False)}, 事件类型:{gathering_info.get('event_type', None)}")
+                        continue
+
+                    # 满足上报条件，发送MQTT消息
+                    event_type = gathering_info.get('event_type', 'gathering_detected')
+                    total_count = gathering_info.get('total_count', 0)
+                    pedestrian_count = gathering_info.get('pedestrian_count', 0)
+                    people_count = gathering_info.get('people_count', 0)
+
+                    log_task(f"[模型9] {event_type} - 总数:{total_count} (行人:{pedestrian_count}, 人群:{people_count})")
+
+                    # 构建时间戳
+                    current_timestamp = datetime.now(BeiJingTime)
+                    date_str = current_timestamp.strftime("%Y-%m-%d")
+                    timestamp_str = current_timestamp.strftime("%Y-%m-%d %H:%M:%S.%f")
+
+                    # 生成文件名
+                    object_name = f"ai/{date_str}/{self.model_name}/{current_timestamp}.jpg"
+
+                    # 绘制检测框并上传图片
+                    infer_image = result.plot()
+                    ori_img_shape = result.orig_shape
+                    _, _ = self.minio_client.upload_image_array(
+                        image_array=infer_image,
+                        object_name=object_name,
+                        image_format='jpg',
+                        quality=85
+                    )
+
+                    # 使用MQTT格式化器构建消息
+                    mqtt_message = MQTTMessageFormatter.format_gathering_message(
+                        object_name=object_name,
+                        detections=detections,
+                        ori_img_shape=ori_img_shape,
+                        task_id=self.task_id,
+                        timestamp_str=timestamp_str,
+                        gathering_info=gathering_info
+                    )
+
+                    # 发送MQTT消息
+                    log_task_debug(f"发送人群聚集MQTT消息 - 数量:{total_count}, 主题:{self.topic}")
+                    print(mqtt_message)
+                    mqtt_success = self.mqtt_client.publish_message(self.topic, mqtt_message)
 
             else:
                 # 其他模型，简单逻辑识别即告警

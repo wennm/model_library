@@ -43,8 +43,8 @@ model:
     imgsz: 1  # 1 代表模型采用原图大小
     # 分类别置信度阈值配置（支持7类目标独立调整）
     class_confidence:
-      accident: 0.6           # 0-事故检测阈值
-      pedestrian: 0.55         # 1-行人检测阈值
+      accident: 0.5           # 0-事故检测阈值
+      pedestrian: 0.4         # 1-行人检测阈值
       motorcycle: 0.2        # 2-摩托车检测阈值
       car: 0.5                # 3-汽车检测阈值
       large_vehicle: 0.4      # 4-大型车辆检测阈值
@@ -147,7 +147,7 @@ model:
   8:
     model_name: "infrared_motorcycle"
     class_path: "model_library.model.infrared_motorcycle.InfraredMotorcycleModel"
-    model_path: "weight/model8_infrared_motorcycle_yolo12x_v1.1.pt"    # 夜间红外摩托车检测
+    model_path: "weight/model8_infrared_motorcycle_yolo12x_v2.0.pt"    # 夜间红外摩托车检测
     config: 0.2  # 检测置信度阈值
     classes: [0]  # 0: motorcycle
     imgsz: 0  # 不采用原图大小，支持SAHI切片推理
@@ -174,6 +174,22 @@ model:
     # ========== 新追踪模式配置 ==========
     tracking_mode_duration: 5.0  # ⭐⭐⭐ 追踪模式持续时间（秒），默认5秒
     report_interval: 1.0         # ⭐⭐⭐ 追踪上报间隔（秒），默认1秒
+
+  9:
+    model_name: "gathering"
+    class_path: "model_library.model.gather_model.GatherModel"
+    model_path: "weight/yolo11x-visdrone.pt"    # 行人检测
+    config: 0.65  # 检测置信度阈值
+    classes: [0, 1]  # 0: pedestrian, 1: people
+    imgsz: 1  # 1 代表模型采用原图大小
+    # 人群聚集阈值配置
+    gathering_threshold: 15  # ⭐ 人群聚集数量阈值（pedestrian + people总数）
+    # 上报策略配置（新增）
+    reporting_strategy: "state_change"  # ⭐ 上报策略: state_change(状态变化), cooldown(冷却期), every_frame(每帧)
+    reporting_cooldown: 60  # ⭐ 上报冷却时间（秒），仅在state_change模式下持续更新时使用
+    # GPU配置
+    estimated_memory: 900  # 预估显存需求(MB)
+    preferred_gpu: null    # 优先GPU ID，null表示自动分配
 
 
 mqtt:

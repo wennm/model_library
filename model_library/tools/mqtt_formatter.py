@@ -328,5 +328,104 @@ class MQTTMessageFormatter:
 
         return mqtt_message
 
+    @staticmethod
+    def format_gathering_message(
+        object_name: str,
+        detections: List[Dict[str, Any]],
+        ori_img_shape: tuple,
+        task_id: str,
+        timestamp_str: str,
+        gathering_info: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        格式化人群聚集检测MQTT消息 - 模型9专用（支持状态机模式）
 
+        Args:
+            object_name: 检测图片存储对象名
+            detections: 检测结果列表（所有行人和人群）
+            ori_img_shape: 原始图像尺寸
+            task_id: 任务ID
+            timestamp_str: 时间戳字符串
+            gathering_info: 人群聚集统计信息，包含:
+                - pedestrian_count: 行人数量
+                - people_count: 人群数量
+                - total_count: 总数量
+                - threshold: 聚集阈值
+                - is_gathering: 是否聚集
+                - event_type: 事件类型 (gathering_start/gathering_update/gathering_end)
+                - elapsed_time: 已持续时长（秒）
+                - duration: 总持续时长（秒，仅gathering_end）
+                - peak_count: 峰值人数
+                - total_updates: 更新次数
 
+        Returns:
+            dict: 人群聚集检测MQTT消息
+        """
+        # 构建所有目标框信息
+        boxes_data = []
+        for det in detections:
+            box_info = {
+                "x": det.get('x', 0),
+                "y": det.get('y', 0),
+                "width": det.get('width', 0),
+                "height": det.get('height', 0),
+                "className": det.get('className', ''),
+                "score": det.get('score', 0)
+            }
+            boxes_data.append(box_info)
+
+        # 构建MQTT消息（保持与其他模型一致的格式）
+        mqtt_message = {"imageInfo": {}}
+        mqtt_message["imageInfo"]["imageId"] = ""
+        mqtt_message["imageInfo"]["dataType"] = "url"
+        mqtt_message["imageInfo"]["imageUrl"] = object_name
+        mqtt_message["imageInfo"]["data"] = ""
+        mqtt_message["imageInfo"]["objNum"] = len(boxes_data)
+        mqtt_message["imageInfo"]["boxs"] = boxes_data
+        mqtt_message["imageInfo"]["imageWidth"] = ori_img_shape[1]
+        mqtt_message["imageInfo"]["imageHeight"] = ori_img_shape[0]
+        mqtt_message["imageInfo"]["imageSize"] = ""
+        mqtt_message["imageInfo"]["task_id"] = task_id
+        mqtt_message["imageInfo"]["timestamp"] = timestamp_str
+
+        # 获取事件类型和统计信息
+        event_type = gathering_info.get('event_type', 'gathering_detected')
+        total_count = gathering_info.get('total_count', 0)
+        pedestrian_count = gathering_info.get('pedestrian_count', 0)
+        people_count = gathering_info.get('people_count', 0)
+        threshold = gathering_info.get('threshold', 10)
+        peak_count = gathering_info.get('peak_count', total_count)
+        total_updates = gathering_info.get('total_updates', 1)
+
+        # 根据事件类型构建消息
+        if event_type == 'gathering_start':
+            message = f"检测到人群聚集，数量为：{total_count}"
+        elif event_type == 'gathering_update':
+            elapsed_time = gathering_info.get('elapsed_time', 0)
+            message = f"人群聚集持续中，数量为：{total_count}，已持续：{elapsed_time}秒"
+        elif event_type == 'gathering_end':
+            duration = gathering_info.get('duration', 0)
+            message = f"人群聚集已解散，持续时长：{duration}秒，峰值人数：{peak_count}"
+        else:
+            message = f"检测到人群聚集，数量为：{total_count}"
+
+        mqtt_message["imageInfo"]["message"] = message
+
+        # 添加人群聚集统计信息（作为扩展字段）
+        mqtt_message["imageInfo"]["statistics"] = {
+            "pedestrian_count": pedestrian_count,
+            "people_count": people_count,
+            "total_count": total_count,
+            "threshold": threshold,
+            "event_type": event_type,
+            "peak_count": peak_count,
+            "total_updates": total_updates
+        }
+
+        # 添加事件特定字段
+        if event_type == 'gathering_update':
+            mqtt_message["imageInfo"]["elapsed_time"] = gathering_info.get('elapsed_time', 0)
+        elif event_type == 'gathering_end':
+            mqtt_message["imageInfo"]["duration"] = gathering_info.get('duration', 0)
+
+        return mqtt_message
