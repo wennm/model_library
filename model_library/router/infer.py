@@ -20,6 +20,7 @@ from ..model.model_manager import model_manager
 from ..tools.reasoner import reasoner_single as reasoner
 from ..tools.gpu_manager import gpu_manager  # 添加GPU管理器导入
 from ..tools.logger import log_task, log_task_error, log_task_debug  # 添加日志工具
+from ..tools.stream_manager import stream_manager  # 添加StreamManager导入
 
 # 设置日志
 logger = logging.getLogger(__name__)
@@ -926,5 +927,118 @@ async def clear_model_cache(
             "status": "error",
             "code": 500,
             "msg": f"清除模型缓存失败: {str(e)}",
+            "data": {}
+        }
+
+
+@router.get(
+    "/streams",
+    summary="获取所有活跃的视频流",
+    description="""
+    获取StreamManager中所有活跃的视频流信息。
+
+    ## 返回信息
+    - 流URL和状态
+    - 订阅者数量和详情
+    - 帧统计信息
+    - 运行时间等
+
+    ## 使用场景
+    - 监控视频流状态
+    - 查看订阅者信息
+    - 诊断RTMP连接问题
+    - 性能分析
+
+    ## 注意事项
+    - 仅显示使用StreamManager的流
+    - 实时反映流状态变化
+    """,
+    response_description="所有活跃流的信息列表"
+)
+async def get_active_streams():
+    try:
+        streams = stream_manager.get_all_streams()
+
+        return {
+            "status": "succeed",
+            "code": 200,
+            "msg": f"查询成功，共{len(streams)}个活跃流",
+            "data": {
+                "streams": streams,
+                "total_streams": len(streams)
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"获取活跃流失败: {str(e)}")
+        return {
+            "status": "error",
+            "code": 500,
+            "msg": f"获取活跃流失败: {str(e)}",
+            "data": {}
+        }
+
+
+@router.get(
+    "/streams/{stream_url:path}",
+    summary="获取指定视频流信息",
+    description="""
+    获取指定视频流的详细信息。
+
+    ## 参数说明
+    - stream_url: 视频流URL（路径参数，需URL编码）
+
+    ## 返回信息
+    - 流状态（running/stopped/error等）
+    - 所有订阅者详情
+    - 帧计数和时间戳
+    - 流ID等信息
+
+    ## 使用场景
+    - 诊断特定流的问题
+    - 查看流的订阅者
+    - 监控流健康状态
+    """,
+    response_description="指定流的详细信息"
+)
+async def get_stream_info(
+    stream_url: str = Path(
+        ...,
+        description="视频流URL（完整路径，例如：rtmp://server/live/stream）",
+        examples=[
+            {"value": "rtmp://live.example.com/stream1", "description": "RTMP直播流"},
+            {"value": "rtsp://192.168.1.100:554/stream", "description": "RTSP摄像头流"}
+        ]
+    )
+):
+    try:
+        from urllib.parse import unquote
+
+        # URL解码
+        decoded_url = unquote(stream_url)
+
+        stream_info = stream_manager.get_stream_info(decoded_url)
+
+        if stream_info is None:
+            return {
+                "status": "error",
+                "code": 404,
+                "msg": f"流不存在: {decoded_url}",
+                "data": {}
+            }
+
+        return {
+            "status": "succeed",
+            "code": 200,
+            "msg": "查询成功",
+            "data": stream_info
+        }
+
+    except Exception as e:
+        logger.error(f"获取流信息失败: {str(e)}")
+        return {
+            "status": "error",
+            "code": 500,
+            "msg": f"获取流信息失败: {str(e)}",
             "data": {}
         }

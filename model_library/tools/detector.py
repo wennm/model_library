@@ -22,8 +22,15 @@ from .mqtt_formatter import MQTTMessageFormatter
 from .accident_strategies import GeometryUtils
 from .resource_cleanup import resource_cleanup_manager
 from .motorcycle_gathering_strategies import MotorcycleGatheringStrategyFactory
+from .stream_adapter import create_stream_iterator
+from .stream_manager import stream_manager
 
 BeiJingTime = ZoneInfo("Asia/Shanghai")
+
+# 全局配置：是否使用StreamManager进行视频帧共享
+# True: 多个模型共享同一RTMP连接（推荐）
+# False: 每个模型独立连接RTMP（原有方式）
+USE_STREAM_MANAGER = True
 
 
 class Detector:
@@ -100,6 +107,10 @@ class Detector:
         self._monitor_thread = None  # 保存监控线程引用
         self._monitor_shutdown_event = threading.Event()  # 监控线程关闭信号
         self._monitor_started = False  # 新增：跟踪监控线程是否已启动
+
+        # 推理日志控制（每1秒记录一次）
+        self._last_log_time = 0  # 上次记录推理日志的时间
+        self._log_interval = 2.0  # 推理日志记录间隔（秒）
 
     
     def __del__(self):
@@ -403,15 +414,46 @@ class Detector:
             log_task_debug(f"开始视频推理 - 任务ID:{self.task_id}, 模型索引:{self.model_index}")
 
             # 根据模型索引开始推理
+            # 使用StreamManager进行帧共享，避免RTMP连接冲突
             if self.model_index == 1:
-                results = self.model.track_video(self.video_path, stream=True, vid_stride=vid_stride, classes=self.classes,
-                                                 imgsz=(int(height), int(width)), verbose=False, conf=self.model_conf)
+                results = create_stream_iterator(
+                    model=self.model,
+                    video_path=self.video_path,
+                    task_id=self.task_id,
+                    vid_stride=vid_stride,
+                    classes=self.classes,
+                    imgsz=(int(height), int(width)),
+                    verbose=False,
+                    conf=self.model_conf,
+                    stop_check_callback=lambda: self._should_stop,
+                    use_stream_manager=USE_STREAM_MANAGER
+                )
             elif self.model_index_3:
-                results = self.model.track_video(self.video_path, stream=True, vid_stride=vid_stride, classes=self.classes,
-                                                 imgsz=(int(height), int(width)), verbose=False, conf=self.model_conf)
+                results = create_stream_iterator(
+                    model=self.model,
+                    video_path=self.video_path,
+                    task_id=self.task_id,
+                    vid_stride=vid_stride,
+                    classes=self.classes,
+                    imgsz=(int(height), int(width)),
+                    verbose=False,
+                    conf=self.model_conf,
+                    stop_check_callback=lambda: self._should_stop,
+                    use_stream_manager=USE_STREAM_MANAGER
+                )
             else:
-                results = self.model.track_video(self.video_path, stream=True, vid_stride=vid_stride, classes=self.classes,
-                                                 imgsz=(int(height), int(width)), verbose=False, conf=self.model_conf)
+                results = create_stream_iterator(
+                    model=self.model,
+                    video_path=self.video_path,
+                    task_id=self.task_id,
+                    vid_stride=vid_stride,
+                    classes=self.classes,
+                    imgsz=(int(height), int(width)),
+                    verbose=False,
+                    conf=self.model_conf,
+                    stop_check_callback=lambda: self._should_stop,
+                    use_stream_manager=USE_STREAM_MANAGER
+                )
             # 根据模型类型执行不同的推理逻辑
             if self.model_index == 1:
                 # 消防通道占用，需要跟踪占用时间
@@ -513,7 +555,12 @@ class Detector:
 
                     if len(result) == 0:
                         continue
-                    log_task(f"模型模型推理中")
+
+                    # 推理日志（每1秒记录一次）
+                    current_time = time.time()
+                    if current_time - self._last_log_time >= self._log_interval:
+                        log_task(f"模型{self.model_index}推理中")
+                        self._last_log_time = current_time
 
                     # 后处理检测结果
                     results_list = self.model.post_process([result])
@@ -665,8 +712,11 @@ class Detector:
                         self._should_stop = True
                         break
 
-                    # 每次推理都输出日志（与Model 3保持一致）
-                    log_task(f"模型8推理中")
+                    # 推理日志（每1秒记录一次）
+                    current_time = time.time()
+                    if current_time - self._last_log_time >= self._log_interval:
+                        log_task(f"模型{self.model_index}推理中")
+                        self._last_log_time = current_time
 
                     # 如果没有检测到目标，也要处理追踪模式更新
                     if len(result) == 0:
@@ -795,13 +845,12 @@ class Detector:
                         self._should_stop = True
                         break
 
-                    # 每次推理都输出日志
-                    log_task(f"模型9推理中")
+                    # 推理日志（每1秒记录一次）
+                    current_time = time.time()
+                    if current_time - self._last_log_time >= self._log_interval:
+                        log_task(f"模型{self.model_index}推理中")
+                        self._last_log_time = current_time
 
-                    # 如果没有检测到目标，继续下一帧
-                    if len(result) == 0:
-                        log_task_debug(f"[模型9] 当前帧未检测到任何目标")
-                        continue
 
                     # 提取检测结果
                     detections = self.model.post_process([result])
@@ -865,7 +914,12 @@ class Detector:
                     # 更新最后帧时间（用于健康监控）
                     self._last_frame_time = time.time()
 
-                    print("视频正常推理")
+                    # 推理日志（每1秒记录一次）
+                    current_time = time.time()
+                    if current_time - self._last_log_time >= self._log_interval:
+                        log_task(f"模型{self.model_index}推理中")
+                        self._last_log_time = current_time
+
                     current_timestamp = datetime.now(BeiJingTime)
                     date_str = current_timestamp.strftime("%Y-%m-%d")
                     timestamp_str = current_timestamp.strftime("%Y-%m-%d %H:%M:%S.%f")
@@ -925,6 +979,17 @@ class Detector:
         finally:
             # 确保资源清理在所有情况下都会执行
             log_task_debug(f"开始清理推理任务资源 - 任务ID:{self.task_id}")
+
+            # 清理StreamManager订阅（如果使用了StreamManager）
+            if USE_STREAM_MANAGER:
+                try:
+                    success = stream_manager.unsubscribe_stream(self.video_path, self.task_id)
+                    if success:
+                        log_task(f"取消订阅流成功 - 任务ID:{self.task_id}, url:{self.video_path}")
+                    else:
+                        log_task_debug(f"取消订阅流失败（可能不存在） - 任务ID:{self.task_id}, url:{self.video_path}")
+                except Exception as e:
+                    log_task_error(f"取消订阅流异常 - 任务ID:{self.task_id}, 错误:{str(e)}")
 
             # 确保监控线程被正确清理
             if self._monitor_started:
