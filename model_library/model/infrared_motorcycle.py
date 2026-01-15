@@ -1,4 +1,4 @@
-"""夜间红外摩托车检测模型 - 用于检测飙车聚集场景（新追踪模式）"""
+"""夜间红外摩托车检测模型 - 用于检测飙车聚集场景（轨迹追踪模式）"""
 from .base_model import BaseModel, device
 from ultralytics.engine.results import Results
 from datetime import datetime
@@ -79,7 +79,7 @@ class InfraredMotorcycleModel(BaseModel):
         """
         提取检测结果并更新追踪历史
 
-        新追踪模式：只负责提取目标框和更新历史，不进行上报判断
+        轨迹追踪模式：只负责提取目标框和更新历史，不进行上报判断
 
         Args:
             results: YOLO检测结果

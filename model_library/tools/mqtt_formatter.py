@@ -215,7 +215,7 @@ class MQTTMessageFormatter:
         timestamp_str: str
     ) -> Dict[str, Any]:
         """
-        格式化摩托车追踪模式MQTT消息（单目标追踪上报）
+        格式化摩托车轨迹追踪模式MQTT消息（单目标轨迹追踪上报）
 
         Args:
             object_name: 检测图片存储对象名
@@ -225,12 +225,14 @@ class MQTTMessageFormatter:
                 - speed: 速度信息
                 - tracking_state: 追踪状态 (tracking/lost)
                 - elapsed_time: 已追踪时间
+                - trajectory_points: 轨迹点列表
+                - inference_count: 推理次数
             ori_img_shape: 原始图像尺寸
             task_id: 任务ID
             timestamp_str: 时间戳字符串
 
         Returns:
-            dict: 摩托车追踪模式MQTT消息
+            dict: 摩托车轨迹追踪模式MQTT消息
         """
         track_id = tracking_info['track_id']
         box_info = tracking_info['box']
@@ -275,7 +277,7 @@ class MQTTMessageFormatter:
         direction_text = speed_info.get('direction', '未知') if speed_info else "未知"
 
         message_parts = [
-            f"摩托车追踪模式",
+            f"摩托车轨迹追踪模式",
             f"追踪状态:{state_text}",
             f"track_id:{track_id}",
             f"已追踪时间:{elapsed_time:.1f}秒",

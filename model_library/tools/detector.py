@@ -93,6 +93,17 @@ class Detector:
             if hasattr(self.model, 'set_gathering_manager'):
                 self.model.set_gathering_manager(self.gathering_manager)
 
+            # ✅ 读取箭头配置
+            model_config = self.config.model_list[self.model_index]
+            self.arrow_config = model_config.get('arrow_config', {
+                'enabled': True,
+                'length': 60,
+                'color': [0, 0, 255],
+                'thickness': 5,
+                'tip_length': 0.3
+            })
+            log_task_debug(f"模型8箭头配置 - 任务ID:{task_id}, 配置:{self.arrow_config}")
+
         log_task(f"检测器初始化完成 - 任务ID:{task_id}, 模型:{self.model_name}, MQTT主题:{self.topic}")
 
         # 注册到资源清理管理器
@@ -602,7 +613,38 @@ class Detector:
 
                     # 使用验证管理器获取通过验证的事故
                     verified_indices = self.verification_manager.get_verified_accidents(accident_boxes, pedestrian_boxes)
-                    log_task_debug(f"事故验证完成 - 任务ID:{self.task_id}, 总事故数:{len(accident_boxes)}, 验证通过数:{len(verified_indices)}")
+
+                    # 构建详细的验证日志
+                    pedestrian_count = len(pedestrian_boxes)
+                    traffic_police_count = len(traffic_police_boxes)
+                    total_pedestrian_police = pedestrian_count + traffic_police_count
+
+                    # 获取验证策略信息
+                    strategy_name = self.verification_manager.get_strategy_info()['strategy_name']
+
+                    if len(verified_indices) == 0:
+                        # 验证未通过，输出详细信息
+                        if total_pedestrian_police < 2:
+                            # 数量不足
+                            log_task(
+                                f"事故验证完成 - 任务ID:{self.task_id}, 总事故数:{len(accident_boxes)}, "
+                                f"验证通过数:0 (原因:{strategy_name}策略-行人+交警数量不足, "
+                                f"检测到行人:{pedestrian_count}, 交警:{traffic_police_count}, 总数:{total_pedestrian_police} < 2)"
+                            )
+                        else:
+                            # 数量足够但不满足策略条件（如重叠面积不足或距离太远）
+                            log_task(
+                                f"事故验证完成 - 任务ID:{self.task_id}, 总事故数:{len(accident_boxes)}, "
+                                f"验证通过数:0 (原因:{strategy_name}策略-数量满足但条件不符, "
+                                f"行人:{pedestrian_count}, 交警:{traffic_police_count}, 总数:{total_pedestrian_police} ≥ 2, "
+                                f"但未满足{strategy_name}策略的具体条件)"
+                            )
+                    else:
+                        # 验证通过
+                        log_task_debug(
+                            f"事故验证完成 - 任务ID:{self.task_id}, 总事故数:{len(accident_boxes)}, "
+                            f"验证通过数:{len(verified_indices)} ({strategy_name}策略, 行人:{pedestrian_count}, 交警:{traffic_police_count})"
+                        )
 
                     # 处理所有通过验证的事故
                     for idx in verified_indices:
@@ -698,7 +740,7 @@ class Detector:
                         f"事故检测处理完成 - 任务ID:{self.task_id}, 总耗时:{accident_time_end - accident_time_start:.3f}秒")
 
             elif self.model_index_8:
-                # 夜间红外摩托车飙车检测模型 - 新追踪模式（3车聚集→追踪5秒）
+                # 夜间红外摩托车飙车检测模型 - 轨迹追踪模式（检测聚集→记录轨迹→上报一次）
                 for result in results:
                     # ✅ 修复：在循环开始就定义current_timestamp，确保所有代码路径都能访问
                     current_timestamp = datetime.now().timestamp()
@@ -718,21 +760,21 @@ class Detector:
                         log_task(f"模型{self.model_index}推理中")
                         self._last_log_time = current_time
 
-                    # 如果没有检测到目标，也要处理追踪模式更新
+                    # 如果没有检测到目标，也要处理轨迹追踪模式更新
                     if len(result) == 0:
-                        log_task_debug(f"[模型8追踪] 当前帧未检测到任何目标")
+                        log_task_debug(f"[模型8轨迹检测] 当前帧未检测到任何目标")
                         all_motorcycles = []
                     else:
                         # 提取所有摩托车目标
                         all_motorcycles = self.model.post_process([result])
-                        log_task_debug(f"[模型8追踪] 检测到{len(all_motorcycles)}个摩托车")
+                        log_task_debug(f"[模型8轨迹检测] 检测到{len(all_motorcycles)}个摩托车")
 
-                    # ========== 新追踪模式逻辑 ==========
+                    # ========== 轨迹追踪模式逻辑 ==========
                     tracking_mode_report = None
 
-                    # 检查是否处于追踪模式
+                    # 检查是否处于轨迹追踪模式
                     if self.gathering_manager.is_in_tracking_mode():
-                        # 更新追踪模式状态
+                        # 更新轨迹追踪模式状态
                         tracking_mode_report = self.gathering_manager.update_tracking_mode(
                             all_motorcycles, current_timestamp
                         )
@@ -742,7 +784,7 @@ class Detector:
                             # 发送追踪失败消息
                             tracking_failure_info = tracking_mode_report['tracking_info']
 
-                            log_task(f"[模型8追踪] 追踪失败 - track_id:{tracking_failure_info['track_id']}, 发送失败消息")
+                            log_task(f"[模型8轨迹检测] 追踪失败 - track_id:{tracking_failure_info['track_id']}, 发送失败消息")
 
                             # 构建追踪失败MQTT消息
                             current_dt = datetime.fromtimestamp(current_timestamp, BeiJingTime)
@@ -761,15 +803,16 @@ class Detector:
                             print(mqtt_message)
                             mqtt_success = self.mqtt_client.publish_message(self.topic, mqtt_message)
 
-                            # 重置追踪模式
+                            # 重置轨迹追踪模式
                             self.gathering_manager.reset_tracking_mode()
                             continue
 
                         # 检查是否应该上报
                         if tracking_mode_report['should_report']:
                             tracking_info = tracking_mode_report['tracking_info']
+                            is_final_report = tracking_mode_report.get('is_final_report', False)
 
-                            log_task(f"[模型8追踪] 上报追踪信息 - track_id:{tracking_info['track_id']}, 状态:{tracking_info['tracking_state']}, 已用时间:{tracking_info['elapsed_time']}秒")
+                            log_task(f"[模型8轨迹检测] 上报追踪信息 - track_id:{tracking_info['track_id']}, 状态:{tracking_info['tracking_state']}, 已用时间:{tracking_info['elapsed_time']}秒, 推理次数:{tracking_info.get('inference_count', 'N/A')}")
 
                             # 构建时间戳
                             current_dt = datetime.fromtimestamp(current_timestamp, BeiJingTime)
@@ -779,8 +822,42 @@ class Detector:
                             # 生成文件名
                             object_name = f"ai/{date_str}/{self.model_name}/{current_dt}.jpg"
 
-                            # 绘制检测框并上传图片（即使丢失也上传最后已知位置的图片）
-                            infer_image = result.plot() if len(result) > 0 else result.orig_img
+                            # ✅ 新绘图逻辑：绘制所有摩托车的目标框，并为置信度最高的摩托车绘制箭头
+                            # cv2 和 numpy 已在文件顶部导入，无需重复导入
+
+                            # 获取原始图片
+                            infer_image = result.orig_img.copy() if len(result) > 0 else result.orig_img
+
+                            # 绘制所有摩托车的目标框
+                            for motorcycle in all_motorcycles:
+                                x, y = int(motorcycle['x']), int(motorcycle['y'])
+                                w, h = int(motorcycle['width'] / 2), int(motorcycle['height'] / 2)
+
+                                # 绘制矩形框（绿色）
+                                cv2.rectangle(infer_image, (x - w, y - h), (x + w, y + h), (0, 255, 0), 2)
+
+                                # 添加标签
+                                label = f"{motorcycle.get('className', 'motorcycle')} {motorcycle['score']:.2f}"
+                                cv2.putText(infer_image, label, (x - w, y - h - 10),
+                                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+                            # ✅ 为置信度最高的摩托车绘制箭头
+                            if 'trajectory_points' in tracking_info and len(tracking_info['trajectory_points']) >= 2:
+                                trajectory_points = tracking_info['trajectory_points']
+                                target_box = tracking_info['box']
+
+                                # 使用管理器的静态方法绘制箭头（传递箭头配置）
+                                from .motorcycle_gathering_strategies import MotorcycleGatheringManager
+                                infer_image = MotorcycleGatheringManager.draw_direction_arrow(
+                                    infer_image,
+                                    trajectory_points,
+                                    target_box,
+                                    arrow_config=self.arrow_config  # ✅ 使用配置中的箭头参数
+                                )
+
+                                log_task_debug(f"[模型8轨迹检测] 已绘制行进方向箭头 - 轨迹点数:{len(trajectory_points)}, 推理次数:{tracking_info.get('inference_count', 'N/A')}, 箭头长度:{self.arrow_config.get('length', 60)}")
+
+                            # 上传图片
                             _, _ = self.minio_client.upload_image_array(
                                 image_array=infer_image,
                                 object_name=object_name,
@@ -808,30 +885,41 @@ class Detector:
                             )
 
                             # 发送到MQTT主题
-                            log_task_debug(f"发送追踪模式MQTT消息 - track_id:{tracking_info['track_id']}, 主题:{self.topic}")
+                            log_task_debug(f"发送轨迹追踪模式MQTT消息 - track_id:{tracking_info['track_id']}, 主题:{self.topic}")
                             print(mqtt_message)
                             mqtt_success = self.mqtt_client.publish_message(self.topic, mqtt_message)
 
+                            # ✅ 如果是最终报告，重置轨迹追踪模式并更新冷却时间
+                            if is_final_report:
+                                log_task(f"[模型8轨迹检测] 上报完成，重置轨迹追踪模式并进入冷却期 - track_id:{tracking_info['track_id']}, 冷却期:{self.gathering_manager.report_cooldown}秒")
+                                self.gathering_manager.update_last_report_time(current_timestamp)  # ✅ 更新冷却时间
+                                self.gathering_manager.reset_tracking_mode()
+
                     else:
-                        # 不在追踪模式，检测是否满足聚集条件
+                        # 不在轨迹追踪模式，检测是否满足聚集条件
                         min_count = self.gathering_manager.strategy.min_gathering_count if self.gathering_manager else 3
-                        if len(all_motorcycles) >= min_count:
+
+                        # ✅ 检查是否在冷却期内
+                        if self.gathering_manager.is_in_cooldown_period(current_timestamp):
+                            cooldown_remaining = self.gathering_manager.report_cooldown - (current_timestamp - self.gathering_manager.last_report_timestamp)
+                            log_task_debug(f"[模型8轨迹检测] 处于上报冷却期，剩余 {cooldown_remaining:.1f} 秒，跳过聚集检测")
+                        elif len(all_motorcycles) >= min_count:
                             # 检测聚集
                             gathering_boxes, _ = self.gathering_manager.detect_gathering_motorcycles(all_motorcycles)
 
                             if gathering_boxes:
-                                # 进入追踪模式
+                                # 进入轨迹追踪模式
                                 success = self.gathering_manager.enter_tracking_mode(gathering_boxes, current_timestamp)
 
                                 if success:
                                     tracking_target_id = self.gathering_manager.get_tracking_target_id()
-                                    log_task(f"[模型8追踪] 检测到{len(gathering_boxes)}车聚集（min_count={min_count}），进入追踪模式 - track_id:{tracking_target_id}")
+                                    log_task(f"[模型8轨迹检测] 检测到{len(gathering_boxes)}车聚集（min_count={min_count}），进入轨迹追踪模式 - track_id:{tracking_target_id}")
                                 else:
-                                    log_task_debug(f"[模型8追踪] 无法进入追踪模式（无有效track_id）")
+                                    log_task_debug(f"[模型8轨迹检测] 无法进入轨迹追踪模式（无有效track_id）")
                             else:
-                                log_task_debug(f"[模型8追踪] 检测到{len(all_motorcycles)}个摩托车，但未满足聚集条件")
+                                log_task_debug(f"[模型8轨迹检测] 检测到{len(all_motorcycles)}个摩托车，但未满足聚集条件")
                         else:
-                            log_task_debug(f"[模型8追踪] 未满足聚集条件（<{min_count}辆摩托车），当前数量:{len(all_motorcycles)}")
+                            log_task_debug(f"[模型8轨迹检测] 未满足聚集条件（<{min_count}辆摩托车），当前数量:{len(all_motorcycles)}")
 
             elif self.model_index_9:
                 # 行人检测模型 - 检测人群聚集并报警
