@@ -171,13 +171,14 @@ model:
       min_gathering_count: 2    # ⭐ 最少聚集数量
       use_center_distance: true  # 使用中心点距离
       speed_window_size: 2        # 速度计算使用的帧数窗口（仅用于计算速度，不影响上报）
-      max_tracking_inferences: 3   # ⭐⭐⭐ 轨迹生成推理次数（收集N次推理后上报），默认3次
+      max_tracking_inferences: 5   # ⭐⭐⭐ 轨迹生成推理次数（收集N次推理后上报），默认3次
       report_cooldown: 10.0        # ⭐⭐⭐ 上报冷却期（秒），上报后N秒内不再检测新的聚集，默认60秒
     # ========== 轨迹检测模式配置 ==========
     tracking_mode_duration: 3.0  # ⭐ 追踪模式超时时间（秒），目标丢失超过此时间则失败
     # ========== 箭头绘制配置 ==========
     arrow_config:
       enabled: true              # 是否启用箭头绘制
+      min_distance: 1.0           # ⭐ 最小移动距离（像素），小于此值不绘制箭头
       length: 60                 # ⭐ 箭头长度（像素）
       color: [0, 0, 255]         # ⭐ 箭头颜色 (B, G, R)，默认红色
       thickness: 5               # 箭头线条粗细

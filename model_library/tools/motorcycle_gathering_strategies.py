@@ -430,7 +430,7 @@ class MotorcycleGatheringManager:
                 'timestamp': current_time,
                 'center': center,
                 'box': target_box,
-                'inference_count': self.tracking_inference_count
+                'inference_count': self.tracking_inference_count + 1  # ✅ 修复：使用增加后的值
             }
             self.tracking_trajectory_points.append(trajectory_point)
 
@@ -450,7 +450,7 @@ class MotorcycleGatheringManager:
 
             log_task_debug(f"[模型8轨迹检测] 记录轨迹点 ({self.tracking_inference_count}/{self.max_tracking_inferences}) - track_id:{self.tracking_target_id}, 位置:({center[0]:.1f}, {center[1]:.1f})")
 
-            # ✅ 检查是否达到第3次推理
+            # ✅ 检查是否达到第N次推理
             if self.tracking_inference_count >= self.max_tracking_inferences:
                 # 达到3次推理，准备上报
                 report['should_report'] = True
@@ -559,6 +559,7 @@ class MotorcycleGatheringManager:
         """
         import cv2
         import numpy as np
+        from .logger import log_task_debug
 
         # ✅ 默认箭头配置
         if arrow_config is None:
@@ -572,9 +573,11 @@ class MotorcycleGatheringManager:
 
         # 检查是否启用箭头绘制
         if not arrow_config.get('enabled', True):
+            log_task_debug(f"[箭头绘制] 箭头绘制未启用")
             return image
 
         if len(trajectory_points) < 2:
+            log_task_debug(f"[箭头绘制] 轨迹点数量不足: {len(trajectory_points)} < 2")
             return image
 
         # ✅ 使用第一个点和最后一个点计算总体方向
@@ -587,7 +590,14 @@ class MotorcycleGatheringManager:
 
         # 计算距离和角度
         distance = np.sqrt(dx**2 + dy**2)
-        if distance < 10:  # 如果移动距离太小，不绘制箭头
+
+        # ✅ 从配置中读取最小移动距离阈值
+        min_distance = arrow_config.get('min_distance', 10.0)  # 默认10像素
+
+        log_task_debug(f"[箭头绘制] 轨迹点数:{len(trajectory_points)}, 移动距离:{distance:.2f}像素, 最小阈值:{min_distance}像素")
+
+        if distance < min_distance:  # 如果移动距离太小，不绘制箭头
+            log_task_debug(f"[箭头绘制] 移动距离太小({distance:.2f} < {min_distance}像素)，跳过箭头绘制")
             return image
 
         # 归一化方向向量
@@ -608,6 +618,8 @@ class MotorcycleGatheringManager:
         arrow_end_x = int(box_center_x + dx_norm * arrow_length)
         arrow_end_y = int(box_center_y + dy_norm * arrow_length)
 
+        log_task_debug(f"[箭头绘制] 绘制箭头 - 起点:({box_center_x}, {box_center_y}), 终点:({arrow_end_x}, {arrow_end_y}), 颜色:{arrow_color}")
+
         # 绘制箭头主线
         cv2.arrowedLine(
             image,
@@ -618,6 +630,7 @@ class MotorcycleGatheringManager:
             tipLength=arrow_tip_length
         )
 
+        log_task_debug(f"[箭头绘制] 箭头绘制完成")
         return image
 
 

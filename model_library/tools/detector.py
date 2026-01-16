@@ -97,6 +97,7 @@ class Detector:
             model_config = self.config.model_list[self.model_index]
             self.arrow_config = model_config.get('arrow_config', {
                 'enabled': True,
+                'min_distance': 3.0,
                 'length': 60,
                 'color': [0, 0, 255],
                 'thickness': 5,
@@ -781,27 +782,10 @@ class Detector:
 
                         # 检查是否追踪失败
                         if tracking_mode_report['is_timeout']:
-                            # 发送追踪失败消息
+                            # 追踪失败，只记录日志，不再发送MQTT消息
                             tracking_failure_info = tracking_mode_report['tracking_info']
 
-                            log_task(f"[模型8轨迹检测] 追踪失败 - track_id:{tracking_failure_info['track_id']}, 发送失败消息")
-
-                            # 构建追踪失败MQTT消息
-                            current_dt = datetime.fromtimestamp(current_timestamp, BeiJingTime)
-                            date_str = current_dt.strftime("%Y-%m-%d")
-                            timestamp_str = current_dt.strftime("%Y-%m-%d %H:%M:%S.%f")
-
-                            mqtt_message = MQTTMessageFormatter.format_tracking_failure_message(
-                                track_id=tracking_failure_info['track_id'],
-                                elapsed_time=tracking_failure_info['elapsed_time'],
-                                task_id=self.task_id,
-                                timestamp_str=timestamp_str
-                            )
-
-                            # 发送追踪失败消息
-                            log_task_debug(f"发送追踪失败MQTT消息 - track_id:{tracking_failure_info['track_id']}, 主题:{self.topic}")
-                            print(mqtt_message)
-                            mqtt_success = self.mqtt_client.publish_message(self.topic, mqtt_message)
+                            log_task(f"[模型8轨迹检测] 追踪失败 - track_id:{tracking_failure_info['track_id']}, 重置轨迹追踪模式")
 
                             # 重置轨迹追踪模式
                             self.gathering_manager.reset_tracking_mode()
@@ -846,6 +830,9 @@ class Detector:
                                 trajectory_points = tracking_info['trajectory_points']
                                 target_box = tracking_info['box']
 
+                                log_task_debug(f"[模型8轨迹检测] 准备绘制箭头 - 轨迹点数:{len(trajectory_points)}, 推理次数:{tracking_info.get('inference_count', 'N/A')}")
+                                log_task_debug(f"[模型8轨迹检测] 目标框信息 - x:{target_box['x']}, y:{target_box['y']}, 箭头配置:{self.arrow_config}")
+
                                 # 使用管理器的静态方法绘制箭头（传递箭头配置）
                                 from .motorcycle_gathering_strategies import MotorcycleGatheringManager
                                 infer_image = MotorcycleGatheringManager.draw_direction_arrow(
@@ -856,6 +843,8 @@ class Detector:
                                 )
 
                                 log_task_debug(f"[模型8轨迹检测] 已绘制行进方向箭头 - 轨迹点数:{len(trajectory_points)}, 推理次数:{tracking_info.get('inference_count', 'N/A')}, 箭头长度:{self.arrow_config.get('length', 60)}")
+                            else:
+                                log_task_debug(f"[模型8轨迹检测] 跳过箭头绘制 - trajectory_points存在:{'trajectory_points' in tracking_info}, 数量:{len(tracking_info.get('trajectory_points', []))}")
 
                             # 上传图片
                             _, _ = self.minio_client.upload_image_array(
