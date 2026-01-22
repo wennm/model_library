@@ -188,13 +188,29 @@ model:
     model_name: "gathering"
     class_path: "model_library.model.gather_model.GatherModel"
     model_path: "weight/yolo11x-visdrone.pt"    # 行人检测
-    config: 0.65  # 检测置信度阈值
+    config: 0.7  # 检测置信度阈值
     classes: [0, 1]  # 0: pedestrian, 1: people
     imgsz: 1  # 1 代表模型采用原图大小
     # 人群聚集阈值配置
     gathering_threshold: 15  # ⭐ 人群聚集数量阈值（pedestrian + people总数）
     # 上报策略配置（新增）
-    reporting_strategy: "state_change"  # ⭐ 上报策略: state_change(状态变化), cooldown(冷却期), every_frame(每帧)
+    reporting_strategy: "state_change"  # ⭐ 上报策略: state_change(状态变化),every_frame(每帧)
+    reporting_cooldown: 60  # ⭐ 上报冷却时间（秒），仅在state_change模式下持续更新时使用
+    # GPU配置
+    estimated_memory: 900  # 预估显存需求(MB)
+    preferred_gpu: null    # 优先GPU ID，null表示自动分配
+
+  10:
+    model_name: "congestion"
+    class_path: "model_library.model.congestion_model.CongestionModel"
+    model_path: "weight/yolo11x-visdrone.pt"    # 交通拥堵检测（车辆检测）
+    config: 0.8  # 检测置信度阈值
+    classes: [3, 4, 5, 6, 7, 8]  
+    imgsz: 1  # 1 代表模型采用原图大小
+    # 交通拥堵阈值配置
+    congestion_threshold: 100  # ⭐ 交通拥堵数量阈值（车辆总数）
+    # 上报策略配置
+    reporting_strategy: "state_change"  # ⭐ 上报策略: state_change(状态变化),every_frame(每帧)
     reporting_cooldown: 60  # ⭐ 上报冷却时间（秒），仅在state_change模式下持续更新时使用
     # GPU配置
     estimated_memory: 900  # 预估显存需求(MB)

@@ -1,4 +1,4 @@
-"""行人检测模型 - 用于检测人群聚集（支持智能上报策略）"""
+"""交通拥堵检测模型 - 用于检测交通拥堵（支持智能上报策略）"""
 from .base_model import BaseModel
 from ultralytics.engine.results import Results
 from typing import List, Dict, Any
@@ -6,14 +6,14 @@ from model_library.tools.logger import log_task_debug, log_task
 from datetime import datetime
 
 
-class GatherModel(BaseModel):
-    """行人检测模型 - 检测人群聚集并报警（支持状态机模式）"""
+class CongestionModel(BaseModel):
+    """交通拥堵检测模型 - 检测交通拥堵并报警（支持状态机模式）"""
 
     def __init__(self, model_path, model_index: int = None, estimated_memory: int = 900,
-                 device_override: str = None, config: float = 0.5, gathering_threshold: int = 10,
+                 device_override: str = None, config: float = 0.5, congestion_threshold: int = 15,
                  reporting_strategy: str = "state_change", reporting_cooldown: int = 60):
         """
-        初始化行人检测模型
+        初始化交通拥堵检测模型
 
         Args:
             model_path: 模型文件路径
@@ -21,7 +21,7 @@ class GatherModel(BaseModel):
             estimated_memory: 预估显存需求(MB)
             device_override: 强制指定设备，覆盖自动分配
             config: 检测置信度阈值
-            gathering_threshold: 人群聚集阈值（pedestrian + people总数）
+            congestion_threshold: 交通拥堵阈值（车辆总数）
             reporting_strategy: 上报策略
                 - "state_change": 状态变化时上报（推荐，默认）
                 - "cooldown": 冷却期模式（首次上报后冷却期内不再上报）
@@ -33,26 +33,37 @@ class GatherModel(BaseModel):
 
         # 保存配置参数
         self.confidence_threshold = config
-        self.gathering_threshold = gathering_threshold
+        self.congestion_threshold = congestion_threshold
         self.reporting_strategy = reporting_strategy
         self.reporting_cooldown = reporting_cooldown
 
-        # 聚集状态管理
-        self.gathering_state = {
-            "is_gathering": False,          # 当前是否聚集
-            "start_time": None,             # 聚集开始时间
-            "last_report_time": None,       # 上次上报时间
-            "peak_count": 0,                # 峰值人数
-            "total_updates": 0,             # 上报次数
-            "consecutive_miss_frames": 0,   # 连续未检测到聚集的帧数
-            "gathering_end_threshold": 30,  # 判定聚集结束的连续帧数（约5秒@6fps）
+        # 拥堵状态管理
+        self.congestion_state = {
+            "is_congestion": False,          # 当前是否拥堵
+            "start_time": None,              # 拥堵开始时间
+            "last_report_time": None,        # 上次上报时间
+            "peak_count": 0,                 # 峰值车辆数
+            "total_updates": 0,              # 上报次数
+            "consecutive_miss_frames": 0,    # 连续未检测到拥堵的帧数
+            "congestion_end_threshold": 30,  # 判定拥堵结束的连续帧数（约5秒@6fps）
         }
 
-        print(f"行人检测模型初始化完成 - 聚集阈值:{gathering_threshold}, 置信度:{config}, 上报策略:{reporting_strategy}")
+        # 车辆类别映射（VisDrone数据集）
+        self.vehicle_class_names = {
+            3: "car",           # 汽车
+            4: "van",           # 货车
+            5: "truck",         # 卡车
+            6: "tricycle",       # 三轮车
+            7: "awning-tricycle",         # 篷车
+            8: "bus"        # 公交车
+        }
+
+
+        print(f"交通拥堵检测模型初始化完成 - 拥堵阈值:{congestion_threshold}, 置信度:{config}, 上报策略:{reporting_strategy}")
 
     def post_process(self, results: Results, **kwargs) -> List[Dict]:
         """
-        提取检测结果并更新聚集状态
+        提取检测结果并更新拥堵状态
 
         Args:
             results: YOLO检测结果
@@ -62,48 +73,53 @@ class GatherModel(BaseModel):
             List[Dict]: 处理后的检测结果列表
         """
         # 基础的后处理
-        pedestrian_boxes = self._extract_boxes(results)
+        vehicle_boxes = self._extract_boxes(results)
 
-        if not pedestrian_boxes:
+        if not vehicle_boxes:
             # 没有检测到任何目标
             return self._handle_empty_detection()
 
-        # 统计pedestrian(0)和people(1)的数量
-        pedestrian_count = 0
-        people_count = 0
+        # 统计各类型车辆数量
+        vehicle_counts = {
+            "car": 0,
+            "van": 0,
+            "truck": 0,
+            "bus": 0,
+            "motor": 0,
+            "bicycle": 0
+        }
 
-        for det in pedestrian_boxes:
+        for det in vehicle_boxes:
             class_id = det.get('classed', -1)
+            class_name = self.vehicle_class_names.get(class_id)
 
-            if class_id == 0:  # pedestrian
-                pedestrian_count += 1
-            elif class_id == 1:  # people
-                people_count += 1
+            if class_name:
+                vehicle_counts[class_name] += 1
 
-        total_count = pedestrian_count + people_count
+        total_count = sum(vehicle_counts.values())
 
-        # 计算整体包围盒（所有行人的最小外接矩形）
-        bounding_box = self._calculate_bounding_box(pedestrian_boxes)
+        # 计算整体包围盒（所有车辆的最小外接矩形）
+        bounding_box = self._calculate_bounding_box(vehicle_boxes)
 
-        # 更新聚集状态
-        gathering_info = self._update_gathering_state(
-            pedestrian_count, people_count, total_count
-        )
+        # 更新拥堵状态
+        congestion_info = self._update_congestion_state(vehicle_counts, total_count)
 
         # 添加统计信息和整体包围盒到第一个检测框（用于返回给detector）
-        if pedestrian_boxes:
-            pedestrian_boxes[0]['gathering_info'] = gathering_info
-            pedestrian_boxes[0]['bounding_box'] = bounding_box  # 添加整体包围盒
+        if vehicle_boxes:
+            vehicle_boxes[0]['congestion_info'] = congestion_info
+            vehicle_boxes[0]['bounding_box'] = bounding_box  # 添加整体包围盒
 
             # 输出调试日志
             log_task_debug(
-                f"[行人检测] 行人:{pedestrian_count}, 人群:{people_count}, "
-                f"总计:{total_count}, 阈值:{self.gathering_threshold}, "
-                f"是否聚集:{gathering_info['is_gathering']}, "
-                f"状态:{gathering_info['state']}, 事件类型:{gathering_info.get('event_type', None)}"
+                f"[拥堵检测] 汽车:{vehicle_counts['car']}, 货车:{vehicle_counts['van']}, "
+                f"卡车:{vehicle_counts['truck']}, 巴士:{vehicle_counts['bus']}, "
+                f"摩托:{vehicle_counts['motor']}, 自行:{vehicle_counts['bicycle']}, "
+                f"总计:{total_count}, 阈值:{self.congestion_threshold}, "
+                f"是否拥堵:{congestion_info['is_congestion']}, "
+                f"状态:{congestion_info['state']}, 事件类型:{congestion_info.get('event_type', None)}"
             )
 
-        return pedestrian_boxes
+        return vehicle_boxes
 
     def _extract_boxes(self, results: Results) -> List[Dict]:
         """从Results中提取标准目标框信息"""
@@ -151,12 +167,12 @@ class GatherModel(BaseModel):
 
         return results_dict
 
-    def _calculate_bounding_box(self, pedestrian_boxes: List[Dict]) -> Dict:
+    def _calculate_bounding_box(self, vehicle_boxes: List[Dict]) -> Dict:
         """
-        计算所有行人的整体包围盒（最小外接矩形）
+        计算所有车辆的整体包围盒（最小外接矩形）
 
         Args:
-            pedestrian_boxes: 行人检测框列表
+            vehicle_boxes: 车辆检测框列表
 
         Returns:
             Dict: 包含整体包围盒信息的字典，格式为：
@@ -165,10 +181,10 @@ class GatherModel(BaseModel):
                     "y": 最小y坐标,
                     "width": 宽度,
                     "height": 高度,
-                    "className": "gathering_area"
+                    "className": "congestion_area"
                 }
         """
-        if not pedestrian_boxes:
+        if not vehicle_boxes:
             return {}
 
         # 初始化边界值
@@ -177,7 +193,7 @@ class GatherModel(BaseModel):
         max_x = 0
         max_y = 0
 
-        for box in pedestrian_boxes:
+        for box in vehicle_boxes:
             x = box.get('x', 0)
             y = box.get('y', 0)
             width = box.get('width', 0)
@@ -195,35 +211,33 @@ class GatherModel(BaseModel):
             "y": min_y,
             "width": max_x - min_x,
             "height": max_y - min_y,
-            "className": "gathering_area"
+            "className": "congestion_area"
         }
 
         return bounding_box
 
-    def _update_gathering_state(self, pedestrian_count: int, people_count: int, total_count: int) -> Dict:
+    def _update_congestion_state(self, vehicle_counts: Dict[str, int], total_count: int) -> Dict:
         """
-        更新聚集状态并判断是否应该上报
+        更新拥堵状态并判断是否应该上报
 
         Args:
-            pedestrian_count: 行人数量
-            people_count: 人群数量
+            vehicle_counts: 各类车辆数量字典
             total_count: 总数量
 
         Returns:
-            Dict: 聚集信息字典
+            Dict: 拥堵信息字典
         """
         current_time = datetime.now().timestamp()
-        is_gathering = total_count >= self.gathering_threshold
+        is_congestion = total_count >= self.congestion_threshold
 
-        state = self.gathering_state
+        state = self.congestion_state
 
-        gathering_info = {
-            'pedestrian_count': pedestrian_count,
-            'people_count': people_count,
+        congestion_info = {
+            'vehicle_counts': vehicle_counts,
             'total_count': total_count,
-            'threshold': self.gathering_threshold,
-            'is_gathering': is_gathering,
-            'state': state['is_gathering'],  # 之前的聚集状态
+            'threshold': self.congestion_threshold,
+            'is_congestion': is_congestion,
+            'state': state['is_congestion'],  # 之前的拥堵状态
             'should_report': False,
             'event_type': None,
             'elapsed_time': 0,
@@ -233,30 +247,30 @@ class GatherModel(BaseModel):
 
         if self.reporting_strategy == "every_frame":
             # 原始模式：每帧都上报
-            gathering_info['should_report'] = is_gathering
-            gathering_info['event_type'] = 'gathering_detected' if is_gathering else None
-            return gathering_info
+            congestion_info['should_report'] = is_congestion
+            congestion_info['event_type'] = 'congestion_detected' if is_congestion else None
+            return congestion_info
 
         # 状态机模式
-        if not state['is_gathering'] and is_gathering:
-            # 状态转换：未聚集 → 聚集
-            log_task(f"[状态转换] 未聚集 → 聚集，数量:{total_count}")
+        if not state['is_congestion'] and is_congestion:
+            # 状态转换：未拥堵 → 拥堵
+            log_task(f"[状态转换] 未拥堵 → 拥堵，数量:{total_count}")
 
-            state['is_gathering'] = True
+            state['is_congestion'] = True
             state['start_time'] = current_time
             state['last_report_time'] = current_time
             state['peak_count'] = total_count
             state['total_updates'] = 1
             state['consecutive_miss_frames'] = 0
 
-            gathering_info['should_report'] = True
-            gathering_info['event_type'] = 'gathering_start'
-            gathering_info['state'] = True
-            gathering_info['peak_count'] = total_count
-            gathering_info['total_updates'] = 1
+            congestion_info['should_report'] = True
+            congestion_info['event_type'] = 'congestion_start'
+            congestion_info['state'] = True
+            congestion_info['peak_count'] = total_count
+            congestion_info['total_updates'] = 1
 
-        elif state['is_gathering'] and is_gathering:
-            # 状态：持续聚集中
+        elif state['is_congestion'] and is_congestion:
+            # 状态：持续拥堵中
             state['consecutive_miss_frames'] = 0
 
             # 更新峰值
@@ -272,31 +286,31 @@ class GatherModel(BaseModel):
                 state['last_report_time'] = current_time
                 state['total_updates'] += 1
 
-                gathering_info['should_report'] = True
-                gathering_info['event_type'] = 'gathering_update'
-                gathering_info['elapsed_time'] = int(elapsed_time)
-                gathering_info['peak_count'] = state['peak_count']
-                gathering_info['total_updates'] = state['total_updates']
+                congestion_info['should_report'] = True
+                congestion_info['event_type'] = 'congestion_update'
+                congestion_info['elapsed_time'] = int(elapsed_time)
+                congestion_info['peak_count'] = state['peak_count']
+                congestion_info['total_updates'] = state['total_updates']
 
-                log_task(f"[聚集更新] 已持续{int(elapsed_time)}秒，当前数量:{total_count}，峰值:{state['peak_count']}")
+                log_task(f"[拥堵更新] 已持续{int(elapsed_time)}秒，当前数量:{total_count}，峰值:{state['peak_count']}")
             else:
-                log_task_debug(f"[聚集持续] 未到上报时间，已{int(elapsed_time)}秒/{self.reporting_cooldown}秒")
+                log_task_debug(f"[拥堵持续] 未到上报时间，已{int(elapsed_time)}秒/{self.reporting_cooldown}秒")
 
-        elif state['is_gathering'] and not is_gathering:
-            # 状态：聚集中，当前帧未检测到聚集
+        elif state['is_congestion'] and not is_congestion:
+            # 状态：拥堵中，当前帧未检测到拥堵
             state['consecutive_miss_frames'] += 1
 
-            log_task_debug(f"[聚集检测] 连续{state['consecutive_miss_frames']}帧未检测到聚集")
+            log_task_debug(f"[拥堵检测] 连续{state['consecutive_miss_frames']}帧未检测到拥堵")
 
-            # 检查是否应该判定聚集结束
-            if state['consecutive_miss_frames'] >= state['gathering_end_threshold']:
-                # 判定聚集结束
+            # 检查是否应该判定拥堵结束
+            if state['consecutive_miss_frames'] >= state['congestion_end_threshold']:
+                # 判定拥堵结束
                 duration = int(current_time - state['start_time'])
 
-                log_task(f"[状态转换] 聚集 → 未聚集，持续时长:{duration}秒，峰值:{state['peak_count']}")
+                log_task(f"[状态转换] 拥堵 → 未拥堵，持续时长:{duration}秒，峰值:{state['peak_count']}")
 
                 # 重置状态
-                state['is_gathering'] = False
+                state['is_congestion'] = False
                 state['start_time'] = None
                 state['last_report_time'] = current_time
                 peak_count = state['peak_count']
@@ -307,41 +321,41 @@ class GatherModel(BaseModel):
                 state['consecutive_miss_frames'] = 0
 
                 # 准备上报信息
-                gathering_info['should_report'] = True
-                gathering_info['event_type'] = 'gathering_end'
-                gathering_info['state'] = False
-                gathering_info['duration'] = duration
-                gathering_info['peak_count'] = peak_count
-                gathering_info['total_updates'] = total_updates
+                congestion_info['should_report'] = True
+                congestion_info['event_type'] = 'congestion_end'
+                congestion_info['state'] = False
+                congestion_info['duration'] = duration
+                congestion_info['peak_count'] = peak_count
+                congestion_info['total_updates'] = total_updates
 
-        # 之前未聚集，当前也未聚集 - 不做任何事
-        elif not state['is_gathering'] and not is_gathering:
+        # 之前未拥堵，当前也未拥堵 - 不做任何事
+        elif not state['is_congestion'] and not is_congestion:
             state['consecutive_miss_frames'] = 0
 
         # 更新返回信息中的当前状态
-        gathering_info['state'] = state['is_gathering']
+        congestion_info['state'] = state['is_congestion']
 
-        return gathering_info
+        return congestion_info
 
     def _handle_empty_detection(self) -> List[Dict]:
         """处理未检测到任何目标的情况"""
-        state = self.gathering_state
+        state = self.congestion_state
 
-        if state['is_gathering']:
-            # 当前处于聚集状态，但未检测到目标
+        if state['is_congestion']:
+            # 当前处于拥堵状态，但未检测到目标
             state['consecutive_miss_frames'] += 1
 
             log_task_debug(f"[空检测] 连续{state['consecutive_miss_frames']}帧未检测到目标")
 
-            # 检查是否应该判定聚集结束
-            if state['consecutive_miss_frames'] >= state['gathering_end_threshold']:
+            # 检查是否应该判定拥堵结束
+            if state['consecutive_miss_frames'] >= state['congestion_end_threshold']:
                 current_time = datetime.now().timestamp()
                 duration = int(current_time - state['start_time'])
 
-                log_task(f"[状态转换] 聚集 → 未聚集（空检测），持续时长:{duration}秒")
+                log_task(f"[状态转换] 拥堵 → 未拥堵（空检测），持续时长:{duration}秒")
 
                 # 重置状态
-                state['is_gathering'] = False
+                state['is_congestion'] = False
                 peak_count = state['peak_count']
                 total_updates = state['total_updates']
 
@@ -351,31 +365,37 @@ class GatherModel(BaseModel):
                 state['total_updates'] = 0
                 state['consecutive_miss_frames'] = 0
 
-                # 返回聚集结束信息（需要上报）
-                gathering_info = {
-                    'pedestrian_count': 0,
-                    'people_count': 0,
+                # 返回拥堵结束信息（需要上报）
+                congestion_info = {
+                    'vehicle_counts': {
+                        "car": 0,
+                        "van": 0,
+                        "truck": 0,
+                        "bus": 0,
+                        "motor": 0,
+                        "bicycle": 0
+                    },
                     'total_count': 0,
-                    'threshold': self.gathering_threshold,
-                    'is_gathering': False,
+                    'threshold': self.congestion_threshold,
+                    'is_congestion': False,
                     'state': False,
                     'should_report': True,
-                    'event_type': 'gathering_end',
+                    'event_type': 'congestion_end',
                     'duration': duration,
                     'peak_count': peak_count,
                     'total_updates': total_updates
                 }
 
-                return [{'gathering_info': gathering_info}]
+                return [{'congestion_info': congestion_info}]
 
         return []
 
     def detect_image(self, source, conf=0.5, stream=False, classes: list = None,
                      imgsz: tuple = (640, 640), verbose: bool = True, half=True):
-        """检测单张图片中的行人"""
+        """检测单张图片中的车辆"""
         actual_conf = conf if conf != 0.5 else self.confidence_threshold
 
-        log_task_debug(f"[行人检测] 开始检测 - conf:{actual_conf}, classes:{classes}, imgsz:{imgsz}")
+        log_task_debug(f"[拥堵检测] 开始检测 - conf:{actual_conf}, classes:{classes}, imgsz:{imgsz}")
 
         if classes is not None:
             results = self.model.predict(source, stream=stream, conf=actual_conf, classes=classes,
@@ -385,15 +405,15 @@ class GatherModel(BaseModel):
                                          verbose=verbose, half=half, device=self.device)
         return results
 
-    def reset_gathering_state(self):
-        """重置聚集状态（用于测试或手动重置）"""
-        self.gathering_state = {
-            "is_gathering": False,
+    def reset_congestion_state(self):
+        """重置拥堵状态（用于测试或手动重置）"""
+        self.congestion_state = {
+            "is_congestion": False,
             "start_time": None,
             "last_report_time": None,
             "peak_count": 0,
             "total_updates": 0,
             "consecutive_miss_frames": 0,
-            "gathering_end_threshold": 30,
+            "congestion_end_threshold": 30,
         }
-        log_task("[状态重置] 聚集状态已重置")
+        log_task("[状态重置] 拥堵状态已重置")

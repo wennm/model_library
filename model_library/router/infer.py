@@ -167,8 +167,9 @@ async def start_inference(
                      "**6**: 红外行人检测<br>"
                      "**7**: 人脸提取<br>"
                      "**8**: 夜间红外摩托车飙车检测 *(聚集+速度阈值)*<br>"
-                     "**9**: 行人聚集检测 *(智能上报策略)*",
-            ge=0, le=9,
+                     "**9**: 行人聚集检测 *(智能上报策略)*<br>"
+                     "**10**: 交通拥堵检测 *(智能上报策略)*",
+            ge=0, le=10,
             examples=[
                 {"value": 0, "description": "电梯摩托车检测"},
                 {"value": 1, "description": "消防通道占用检测"},
@@ -179,7 +180,8 @@ async def start_inference(
                 {"value": 6, "description": "红外行人检测"},
                 {"value": 7, "description": "人脸提取"},
                 {"value": 8, "description": "夜间红外摩托车飙车检测"},
-                {"value": 9, "description": "行人聚集检测"}
+                {"value": 9, "description": "行人聚集检测"},
+                {"value": 10, "description": "交通拥堵检测"}
             ]
         ),
         pixel_position: Optional[str] = Form(
@@ -215,11 +217,11 @@ async def start_inference(
                 "data": {}
             }
 
-        if model_index not in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]:
+        if model_index not in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]:
             return {
                 "status": "error",
                 "code": 400,
-                "msg": "模型索引必须是 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 中的一个",
+                "msg": "模型索引必须是 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 中的一个",
                 "data": {}
             }
 
@@ -351,8 +353,9 @@ async def start_inference_image(
                      "**6**: 红外行人检测<br>"
                      "**7**: 人脸提取<br>"
                      "**8**: 夜间红外摩托车飙车检测 *(聚集+速度阈值)*<br>"
-                     "**9**: 行人聚集检测 *(智能上报策略)*",
-            ge=0, le=9,
+                     "**9**: 行人聚集检测 *(智能上报策略)*<br>"
+                     "**10**: 交通拥堵检测 *(智能上报策略)*",
+            ge=0, le=10,
             examples=[
                 {"value": 0, "description": "电梯摩托车检测"},
                 {"value": 1, "description": "消防通道占用检测"},
@@ -363,7 +366,8 @@ async def start_inference_image(
                 {"value": 6, "description": "红外行人检测"},
                 {"value": 7, "description": "人脸提取"},
                 {"value": 8, "description": "夜间红外摩托车飙车检测"},
-                {"value": 9, "description": "行人聚集检测"}
+                {"value": 9, "description": "行人聚集检测"},
+                {"value": 10, "description": "交通拥堵检测"}
             ]
         ),
 ):
@@ -383,11 +387,11 @@ async def start_inference_image(
             })
             return resp
 
-        if model_index not in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]:
+        if model_index not in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]:
             resp.update({
                 "status": "error",
                 "code": 400,
-                "msg": "模型索引必须是 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 中的一个"
+                "msg": "模型索引必须是 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 中的一个"
             })
             return resp
 
@@ -903,7 +907,7 @@ async def clear_model_cache(
     model_index: int = Path(
         ...,
         description="要清除缓存的模型索引",
-        ge=0, le=9
+        ge=0, le=10
     )
 ):
     try:

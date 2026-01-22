@@ -24,6 +24,7 @@ from .resource_cleanup import resource_cleanup_manager
 from .motorcycle_gathering_strategies import MotorcycleGatheringStrategyFactory
 from .stream_adapter import create_stream_iterator
 from .stream_manager import stream_manager
+from .drawing_utils import plot_gathering_bounding_box, plot_congestion_bounding_box
 
 BeiJingTime = ZoneInfo("Asia/Shanghai")
 
@@ -74,6 +75,9 @@ class Detector:
 
         # 初始化行人检测模型标志（仅用于模型9）
         self.model_index_9 = self.model_index == 9
+
+        # 初始化交通拥堵检测模型标志（仅用于模型10）
+        self.model_index_10 = self.model_index == 10
 
         log_task_debug(f"获取模型实例 - 任务ID:{task_id}, 模型:{self.model_name}")
         self.model = model_manager.get_model(self.model_index, task_id)
@@ -959,9 +963,9 @@ class Detector:
                     # 生成文件名
                     object_name = f"ai/{date_str}/{self.model_name}/{current_timestamp}.jpg"
 
-                    # 绘制检测框并上传图片
-                    infer_image = result.plot()
+                    # 绘制检测框并上传图片（只绘制整体大框，不绘制所有行人小框）
                     ori_img_shape = result.orig_shape
+                    infer_image = plot_gathering_bounding_box(result, detections)
                     _, _ = self.minio_client.upload_image_array(
                         image_array=infer_image,
                         object_name=object_name,
@@ -981,6 +985,78 @@ class Detector:
 
                     # 发送MQTT消息
                     log_task_debug(f"发送人群聚集MQTT消息 - 数量:{total_count}, 主题:{self.topic}")
+                    print(mqtt_message)
+                    mqtt_success = self.mqtt_client.publish_message(self.topic, mqtt_message)
+
+            elif self.model_index_10:
+                # 交通拥堵检测模型 - 检测交通拥堵并报警
+                for result in results:
+                    # 更新最后帧时间（用于健康监控）
+                    self._last_frame_time = time.time()
+
+                    # 检查停止请求
+                    if await self.check_stop():
+                        log_task(f"模型10收到停止请求，退出推理循环 - 任务ID:{self.task_id}")
+                        self._should_stop = True
+                        break
+
+                    # 推理日志（每1秒记录一次）
+                    current_time = time.time()
+                    if current_time - self._last_log_time >= self._log_interval:
+                        log_task(f"模型{self.model_index}推理中")
+                        self._last_log_time = current_time
+
+                    # 提取检测结果
+                    detections = self.model.post_process([result])
+
+                    if not detections:
+                        continue
+
+                    # 获取交通拥堵信息（在第一个检测框中）
+                    congestion_info = detections[0].get('congestion_info', {})
+
+                    # 检查是否应该上报（基于状态机逻辑）
+                    if not congestion_info.get('should_report', False):
+                        log_task_debug(f"[模型10] 不满足上报条件 - 当前数量:{congestion_info.get('total_count', 0)}, 状态:{congestion_info.get('state', False)}, 事件类型:{congestion_info.get('event_type', None)}")
+                        continue
+
+                    # 满足上报条件，发送MQTT消息
+                    event_type = congestion_info.get('event_type', 'congestion_detected')
+                    total_count = congestion_info.get('total_count', 0)
+                    vehicle_counts = congestion_info.get('vehicle_counts', {})
+
+                    log_task(f"[模型10] {event_type} - 总数:{total_count} (汽车:{vehicle_counts.get('car', 0)}, 货车:{vehicle_counts.get('van', 0)}, 卡车:{vehicle_counts.get('truck', 0)}, 巴士:{vehicle_counts.get('bus', 0)}, 摩托:{vehicle_counts.get('motor', 0)}, 自行:{vehicle_counts.get('bicycle', 0)})")
+
+                    # 构建时间戳
+                    current_timestamp = datetime.now(BeiJingTime)
+                    date_str = current_timestamp.strftime("%Y-%m-%d")
+                    timestamp_str = current_timestamp.strftime("%Y-%m-%d %H:%M:%S.%f")
+
+                    # 生成文件名
+                    object_name = f"ai/{date_str}/{self.model_name}/{current_timestamp}.jpg"
+
+                    # 绘制检测框并上传图片（只绘制整体大框，不绘制所有车辆小框）
+                    ori_img_shape = result.orig_shape
+                    infer_image = plot_congestion_bounding_box(result, detections)
+                    _, _ = self.minio_client.upload_image_array(
+                        image_array=infer_image,
+                        object_name=object_name,
+                        image_format='jpg',
+                        quality=85
+                    )
+
+                    # 使用MQTT格式化器构建消息
+                    mqtt_message = MQTTMessageFormatter.format_congestion_message(
+                        object_name=object_name,
+                        detections=detections,
+                        ori_img_shape=ori_img_shape,
+                        task_id=self.task_id,
+                        timestamp_str=timestamp_str,
+                        congestion_info=congestion_info
+                    )
+
+                    # 发送MQTT消息
+                    log_task_debug(f"发送交通拥堵MQTT消息 - 数量:{total_count}, 主题:{self.topic}")
                     print(mqtt_message)
                     mqtt_success = self.mqtt_client.publish_message(self.topic, mqtt_message)
 

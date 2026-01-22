@@ -363,16 +363,19 @@ class MQTTMessageFormatter:
         Returns:
             dict: 人群聚集检测MQTT消息
         """
-        # 构建所有目标框信息
+        # 从第一个检测框中获取整体包围盒
+        bounding_box = detections[0].get('bounding_box', {}) if detections else {}
+
+        # 构建目标框信息（只返回整体大框）
         boxes_data = []
-        for det in detections:
+        if bounding_box:
             box_info = {
-                "x": det.get('x', 0),
-                "y": det.get('y', 0),
-                "width": det.get('width', 0),
-                "height": det.get('height', 0),
-                "className": det.get('className', ''),
-                "score": det.get('score', 0)
+                "x": bounding_box.get('x', 0),
+                "y": bounding_box.get('y', 0),
+                "width": bounding_box.get('width', 0),
+                "height": bounding_box.get('height', 0),
+                "className": bounding_box.get('className', 'gathering_area'),
+                "score": 1.0  # 整体包围盒没有置信度，设置为1.0
             }
             boxes_data.append(box_info)
 
@@ -429,5 +432,107 @@ class MQTTMessageFormatter:
             mqtt_message["imageInfo"]["elapsed_time"] = gathering_info.get('elapsed_time', 0)
         elif event_type == 'gathering_end':
             mqtt_message["imageInfo"]["duration"] = gathering_info.get('duration', 0)
+
+        return mqtt_message
+
+    @staticmethod
+    def format_congestion_message(
+        object_name: str,
+        detections: List[Dict[str, Any]],
+        ori_img_shape: tuple,
+        task_id: str,
+        timestamp_str: str,
+        congestion_info: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        格式化交通拥堵检测MQTT消息 - 模型10专用（支持状态机模式）
+
+        Args:
+            object_name: 检测图片存储对象名
+            detections: 检测结果列表（所有车辆）
+            ori_img_shape: 原始图像尺寸
+            task_id: 任务ID
+            timestamp_str: 时间戳字符串
+            congestion_info: 交通拥堵统计信息，包含:
+                - vehicle_counts: 各类车辆数量字典 {car, van, truck, bus, motor, bicycle}
+                - total_count: 总数量
+                - threshold: 拥堵阈值
+                - is_congestion: 是否拥堵
+                - event_type: 事件类型 (congestion_start/congestion_update/congestion_end)
+                - elapsed_time: 已持续时长（秒）
+                - duration: 总持续时长（秒，仅congestion_end）
+                - peak_count: 峰值车辆数
+                - total_updates: 更新次数
+
+        Returns:
+            dict: 交通拥堵检测MQTT消息
+        """
+        # 从第一个检测框中获取整体包围盒
+        bounding_box = detections[0].get('bounding_box', {}) if detections else {}
+
+        # 构建目标框信息（只返回整体大框）
+        boxes_data = []
+        if bounding_box:
+            box_info = {
+                "x": bounding_box.get('x', 0),
+                "y": bounding_box.get('y', 0),
+                "width": bounding_box.get('width', 0),
+                "height": bounding_box.get('height', 0),
+                "className": bounding_box.get('className', 'congestion_area'),
+                "score": 1.0  # 整体包围盒没有置信度，设置为1.0
+            }
+            boxes_data.append(box_info)
+
+        # 构建MQTT消息（保持与其他模型一致的格式）
+        mqtt_message = {"imageInfo": {}}
+        mqtt_message["imageInfo"]["imageId"] = ""
+        mqtt_message["imageInfo"]["dataType"] = "url"
+        mqtt_message["imageInfo"]["imageUrl"] = object_name
+        mqtt_message["imageInfo"]["data"] = ""
+        mqtt_message["imageInfo"]["objNum"] = len(boxes_data)
+        mqtt_message["imageInfo"]["boxs"] = boxes_data
+        mqtt_message["imageInfo"]["imageWidth"] = ori_img_shape[1]
+        mqtt_message["imageInfo"]["imageHeight"] = ori_img_shape[0]
+        mqtt_message["imageInfo"]["imageSize"] = ""
+        mqtt_message["imageInfo"]["task_id"] = task_id
+        mqtt_message["imageInfo"]["timestamp"] = timestamp_str
+
+        # 获取事件类型和统计信息
+        event_type = congestion_info.get('event_type', 'congestion_detected')
+        total_count = congestion_info.get('total_count', 0)
+        vehicle_counts = congestion_info.get('vehicle_counts', {})
+        threshold = congestion_info.get('threshold', 10)
+        peak_count = congestion_info.get('peak_count', total_count)
+        total_updates = congestion_info.get('total_updates', 1)
+
+        # 根据事件类型构建消息
+        if event_type == 'congestion_start':
+            message = f"检测到交通拥堵，车辆数为：{total_count}"
+        elif event_type == 'congestion_update':
+            elapsed_time = congestion_info.get('elapsed_time', 0)
+            message = f"交通拥堵持续中，车辆数为：{total_count}，已持续：{elapsed_time}秒"
+        elif event_type == 'congestion_end':
+            duration = congestion_info.get('duration', 0)
+            message = f"交通拥堵已解除，持续时长：{duration}秒，峰值车辆数：{peak_count}"
+        else:
+            message = f"检测到交通拥堵，车辆数为：{total_count}"
+
+        mqtt_message["imageInfo"]["message"] = message
+
+        # 添加交通拥堵统计信息（作为扩展字段）
+        mqtt_message["imageInfo"]["statistics"] = {
+            "vehicle_counts": vehicle_counts,
+            "total_count": total_count,
+            "threshold": threshold,
+            "event_type": event_type,
+            "peak_count": peak_count,
+            "total_updates": total_updates
+        }
+
+        # 添加事件特定字段
+        if event_type == 'congestion_update':
+            mqtt_message["imageInfo"]["elapsed_time"] = congestion_info.get('elapsed_time', 0)
+        elif event_type == 'congestion_end':
+            mqtt_message["imageInfo"]["duration"] = congestion_info.get('duration', 0)
 
         return mqtt_message
