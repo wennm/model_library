@@ -68,6 +68,9 @@ class Detector:
             vlm_config = model_config.get('vlm_verification', {})
             global_ms_conf = self.config.config.get('modelscope', {})
             self.vlm_verifier = VLMVerifier(vlm_config, global_ms_conf)
+            # 读取MQTT冷却时间配置
+            self.mqtt_cooldown = model_config.get('mqtt_cooldown', 60)
+            self.last_mqtt_report_time = 0  # 上次MQTT上报时间（时间戳）
 
         # 初始化摩托车聚集检测管理器（仅用于模型8）
         self.gathering_manager = None
@@ -195,6 +198,17 @@ class Detector:
             message: 可选的事故类型描述消息
         """
         try:
+            # 检查MQTT冷却时间（仅用于模型3）
+            if self.model_index_3:
+                current_time = time.time()
+                time_since_last_report = current_time - self.last_mqtt_report_time
+
+                if time_since_last_report < self.mqtt_cooldown:
+                    remaining_time = self.mqtt_cooldown - time_since_last_report
+                    log_task_debug(f"MQTT冷却中，跳过上报和保存 - 任务ID:{self.task_id}, "
+                                 f"剩余冷却时间:{remaining_time:.1f}秒")
+                    return  # 直接返回，不保存图片也不上报MQTT
+
             # 使用策略工厂的绘制方法，只绘制验证后的真实事故框，不绘制行人框
             infer_image = self.verification_manager.plot_verified_accidents_only(result, [accident_item])
             _, _ = self.minio_client.upload_image_array(
@@ -220,6 +234,12 @@ class Detector:
             log_task_debug(f"发送事故MQTT消息 - 任务ID:{self.task_id}, 主题:{self.topic}")
             mqtt_success = self.mqtt_client.publish_message(self.topic, mqtt_message)
             log_task_debug(f"MQTT发送结果 - 任务ID:{self.task_id}, 成功:{mqtt_success}")
+
+            # 更新最后上报时间（仅用于模型3）
+            if self.model_index_3 and mqtt_success:
+                self.last_mqtt_report_time = time.time()
+                log_task_debug(f"更新MQTT上报时间 - 任务ID:{self.task_id}, "
+                             f"冷却时间:{self.mqtt_cooldown}秒")
 
         except Exception as e:
             log_task_error(f"事故保存和发布失败 - 任务ID:{self.task_id}, 错误:{str(e)}")
