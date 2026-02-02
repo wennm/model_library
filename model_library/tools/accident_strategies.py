@@ -479,6 +479,212 @@ class AccidentStrategyFactory:
             return cls.create_manager('overlap', {'overlap_threshold': 0.3})
 
 
+def verify_accident_with_vehicles(
+    accident_box: Dict[str, Any],
+    pedestrian_boxes: List[Dict[str, Any]],
+    traffic_police_boxes: List[Dict[str, Any]],
+    car_boxes: List[Dict[str, Any]],
+    motorcycle_boxes: List[Dict[str, Any]],
+    large_vehicle_boxes: List[Dict[str, Any]],
+    config: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    一步验证：同时检查人和车辆，判断事故类型并提升YOLO分数
+
+    验证规则：
+    1. 行人+交警数量必须 >= min_pedestrian_police（默认2）
+    2. 车辆条件（满足其一）：
+       - car数量 >= min_car_count_normal（默认2）：普通事故
+       - 有car且enable_motorcycle_accident=True且有motorcycle：摩托车事故
+       - 有car且enable_large_vehicle_accident=True且有large_vehicle：大型车辆事故
+
+    Args:
+        accident_box: 事故目标框 (xywhr格式)
+        pedestrian_boxes: 行人目标框列表
+        traffic_police_boxes: 交警目标框列表
+        car_boxes: 汽车目标框列表
+        motorcycle_boxes: 摩托车目标框列表
+        large_vehicle_boxes: 大型车辆目标框列表
+        config: 配置字典，包含：
+            - vehicle_overlap_threshold: 车辆重叠面积阈值
+            - min_pedestrian_police: 最少行人+交警数量
+            - min_car_count_normal: 普通事故最少车辆数
+            - enable_motorcycle_accident: 是否启用摩托车事故
+            - enable_large_vehicle_accident: 是否启用大型车辆事故
+            - yolo_score_boost: YOLO分数提升值
+
+    Returns:
+        dict: 验证结果，包含:
+            - passed: 是否通过验证 (bool)
+            - accident_type: 事故类型 ("normal", "motorcycle", "large_vehicle", "unknown")
+            - pedestrian_count: 行人数量
+            - police_count: 交警数量
+            - car_count: 汽车数量
+            - motorcycle_count: 摩托车数量
+            - large_vehicle_count: 大型车辆数量
+            - boosted_score: 提升后的YOLO分数（如果通过验证）
+            - message: 验证失败的原因或事故描述
+    """
+    # 提取配置参数
+    vehicle_overlap_threshold = config.get('vehicle_overlap_threshold', 0.3)
+    min_pedestrian_police = config.get('min_pedestrian_police', 2)
+    min_car_count_normal = config.get('min_car_count_normal', 2)
+    enable_motorcycle = config.get('enable_motorcycle_accident', True)
+    enable_large_vehicle = config.get('enable_large_vehicle_accident', True)
+
+    # ⭐ 自适应YOLO分数提升配置（根据是否有交警）
+    yolo_score_boost_with_police = config.get('yolo_score_boost_with_police', 0.2)
+    yolo_score_boost_without_police = config.get('yolo_score_boost_without_police', 0.1)
+
+    # 提取事故框参数
+    accident_xywhr = [
+        accident_box['x'],
+        accident_box['y'],
+        accident_box['width'],
+        accident_box['height'],
+        accident_box['rotation']
+    ]
+    accident_poly = GeometryUtils.convert_xywhr_to_polygon(*accident_xywhr)
+
+    # 统计事故框内的各类目标数量
+    pedestrian_count = 0
+    police_count = 0
+    car_count = 0
+    motorcycle_count = 0
+    large_vehicle_count = 0
+
+    # 检查行人
+    for box in pedestrian_boxes:
+        box_poly = GeometryUtils.convert_xywhr_to_polygon(
+            box['x'], box['y'], box['width'], box['height'], box['rotation']
+        )
+        intersection = accident_poly.intersection(box_poly)
+        if intersection.area > 0:
+            overlap_ratio = intersection.area / box_poly.area
+            if overlap_ratio >= vehicle_overlap_threshold:
+                pedestrian_count += 1
+
+    # 检查交警
+    for box in traffic_police_boxes:
+        box_poly = GeometryUtils.convert_xywhr_to_polygon(
+            box['x'], box['y'], box['width'], box['height'], box['rotation']
+        )
+        intersection = accident_poly.intersection(box_poly)
+        if intersection.area > 0:
+            overlap_ratio = intersection.area / box_poly.area
+            if overlap_ratio >= vehicle_overlap_threshold:
+                police_count += 1
+
+    # 检查汽车
+    for box in car_boxes:
+        box_poly = GeometryUtils.convert_xywhr_to_polygon(
+            box['x'], box['y'], box['width'], box['height'], box['rotation']
+        )
+        intersection = accident_poly.intersection(box_poly)
+        if intersection.area > 0:
+            overlap_ratio = intersection.area / box_poly.area
+            if overlap_ratio >= vehicle_overlap_threshold:
+                car_count += 1
+
+    # 检查摩托车
+    for box in motorcycle_boxes:
+        box_poly = GeometryUtils.convert_xywhr_to_polygon(
+            box['x'], box['y'], box['width'], box['height'], box['rotation']
+        )
+        intersection = accident_poly.intersection(box_poly)
+        if intersection.area > 0:
+            overlap_ratio = intersection.area / box_poly.area
+            if overlap_ratio >= vehicle_overlap_threshold:
+                motorcycle_count += 1
+
+    # 检查大型车辆
+    for box in large_vehicle_boxes:
+        box_poly = GeometryUtils.convert_xywhr_to_polygon(
+            box['x'], box['y'], box['width'], box['height'], box['rotation']
+        )
+        intersection = accident_poly.intersection(box_poly)
+        if intersection.area > 0:
+            overlap_ratio = intersection.area / box_poly.area
+            if overlap_ratio >= vehicle_overlap_threshold:
+                large_vehicle_count += 1
+
+    # 验证条件1：行人+交警数量
+    total_pedestrian_police = pedestrian_count + police_count
+    if total_pedestrian_police < min_pedestrian_police:
+        return {
+            "passed": False,
+            "accident_type": "unknown",
+            "pedestrian_count": pedestrian_count,
+            "police_count": police_count,
+            "car_count": car_count,
+            "motorcycle_count": motorcycle_count,
+            "large_vehicle_count": large_vehicle_count,
+            "boosted_score": accident_box.get('score', 0.0),
+            "message": f"行人+交警数量不足 ({total_pedestrian_police} < {min_pedestrian_police})"
+        }
+
+    # 验证条件2：车辆类型和数量
+    accident_type = "unknown"
+    passed = False
+    message = ""
+
+    # 优先级1：大型车辆事故（有car + large_vehicle）
+    if enable_large_vehicle and car_count > 0 and large_vehicle_count > 0:
+        accident_type = "large_vehicle"
+        passed = True
+        message = f"大型车辆事故（汽车:{car_count}, 大型车辆:{large_vehicle_count}, 行人:{pedestrian_count}, 交警:{police_count}）"
+
+    # 优先级2：摩托车事故（有car + motorcycle）
+    elif enable_motorcycle and car_count > 0 and motorcycle_count > 0:
+        accident_type = "motorcycle"
+        passed = True
+        message = f"摩托车事故（汽车:{car_count}, 摩托车:{motorcycle_count}, 行人:{pedestrian_count}, 交警:{police_count}）"
+
+    # 优先级3：普通事故（car数量 >= 2）
+    elif car_count >= min_car_count_normal:
+        accident_type = "normal"
+        passed = True
+        message = f"普通事故（汽车:{car_count}, 行人:{pedestrian_count}, 交警:{police_count}）"
+
+    else:
+        # 车辆条件不满足
+        if car_count == 0:
+            message = f"事故框内无车辆（行人:{pedestrian_count}, 交警:{police_count}）"
+        else:
+            message = f"车辆数量不足（汽车:{car_count} < {min_car_count_normal}，行人:{pedestrian_count}, 交警:{police_count}）"
+
+    # 计算提升后的YOLO分数（⭐ 根据是否有交警自适应）
+    original_score = accident_box.get('score', 0.0)
+    if passed:
+        # 根据是否有交警选择不同的提升值
+        if police_count > 0:
+            yolo_score_boost = yolo_score_boost_with_police
+            boost_reason = f"有交警提升({police_count}名交警)"
+        else:
+            yolo_score_boost = yolo_score_boost_without_police
+            boost_reason = "无交警提升"
+        boosted_score = min(original_score + yolo_score_boost, 1.0)
+    else:
+        yolo_score_boost = 0.0
+        boosted_score = original_score
+        boost_reason = "未通过验证"
+
+    return {
+        "passed": passed,
+        "accident_type": accident_type,
+        "pedestrian_count": pedestrian_count,
+        "police_count": police_count,
+        "car_count": car_count,
+        "motorcycle_count": motorcycle_count,
+        "large_vehicle_count": large_vehicle_count,
+        "original_score": original_score,  # ⭐ 新增：原始YOLO分数
+        "yolo_score_boost": yolo_score_boost,  # ⭐ 新增：分数提升值
+        "boosted_score": boosted_score,
+        "boost_reason": boost_reason,  # ⭐ 新增：提升原因说明
+        "message": message
+    }
+
+
 def classify_accident_type(
     accident_box: Dict[str, Any],
     all_boxes: List[Dict[str, Any]],

@@ -12,29 +12,64 @@ class MQTTMessageFormatter:
         ori_img_shape: tuple,
         task_id: str,
         timestamp_str: str,
-        message: str = None
+        message: str = None,
+        accident_type: str = None,
+        verification_info: Dict[str, Any] = None
     ) -> Dict[str, Any]:
         """
-        格式化事故检测MQTT消息 - 支持事故类型message字段
+        格式化事故检测MQTT消息 - 与原始格式保持一致
 
         Args:
             object_name: 事故图片存储对象名
-            accident_item: 事故检测项
+            accident_item: 事故检测项（accident框，包含accident_car_count和accident_car_xyxy）
             ori_img_shape: 原始图像尺寸
             task_id: 任务ID
             timestamp_str: 时间戳字符串
             message: 可选的消息字段，描述事故类型和详细信息
+            accident_type: 事故类型 (normal/motorcycle/large_vehicle)
+            verification_info: 验证详情信息，包含:
+                - pedestrian_count: 行人数量
+                - police_count: 交警数量
+                - car_count: 汽车数量
+                - motorcycle_count: 摩托车数量
+                - large_vehicle_count: 大型车辆数量
+                - has_police: 是否有交警
+                - original_yolo_score: 原始YOLO分数
+                - boosted_yolo_score: 提升后YOLO分数
+                - yolo_score_boost: YOLO分数提升值
+                - vlm_confidence: VLM置信度分数
+                - final_score: 最终协同验证总分
 
         Returns:
-            dict: 事故检测MQTT消息
+            dict: 事故检测MQTT消息（boxs为对象格式）
         """
         mqtt_message = {"imageInfo": {}}
         mqtt_message["imageInfo"]["imageId"] = ""
         mqtt_message["imageInfo"]["dataType"] = "url"
         mqtt_message["imageInfo"]["imageUrl"] = object_name
         mqtt_message["imageInfo"]["data"] = ""
-        mqtt_message["imageInfo"]["objNum"] = accident_item.get("objNum", len(accident_item) if isinstance(accident_item, list) else 1)
-        mqtt_message["imageInfo"]["boxs"] = accident_item
+
+        # ⭐ objNum = 1(事故框) + accident_car_count(涉事车辆数量)
+        accident_car_count = accident_item.get('accident_car_count', 0)
+        mqtt_message["imageInfo"]["objNum"] = 1 + accident_car_count
+
+        # ⭐ boxs为对象格式（不是数组），包含accident框信息和车辆坐标
+        boxs_obj = {
+            "x": accident_item.get('x', 0),
+            "y": accident_item.get('y', 0),
+            "width": accident_item.get('width', 0),
+            "height": accident_item.get('height', 0),
+            "rotation": accident_item.get('rotation', 0),
+            "score": accident_item.get('score', 0),
+            "track_id": accident_item.get('track_id', 'unknown'),
+            "classed": accident_item.get('class', 0),  # ⭐ 注意字段名是classed不是class
+            "className": accident_item.get('className', 'accident'),
+            "text": "",
+            "accident_car_count": accident_car_count,
+            "accident_car_xyxy": accident_item.get('accident_car_xyxy', [])
+        }
+        mqtt_message["imageInfo"]["boxs"] = boxs_obj
+
         mqtt_message["imageInfo"]["imageWidth"] = ori_img_shape[1]
         mqtt_message["imageInfo"]["imageHeight"] = ori_img_shape[0]
         mqtt_message["imageInfo"]["imageSize"] = ""
@@ -44,6 +79,13 @@ class MQTTMessageFormatter:
         # 添加message字段（如果提供）
         if message:
             mqtt_message["imageInfo"]["message"] = message
+
+        # 添加结构化的事故类型和验证信息（如果提供）
+        if accident_type:
+            mqtt_message["imageInfo"]["accident_type"] = accident_type
+
+        if verification_info:
+            mqtt_message["imageInfo"]["verification"] = verification_info
 
         return mqtt_message
 

@@ -36,25 +36,26 @@ model:
   3:
     model_name: "accident"
     class_path: "model_library.model.track_accident.TrackAccident"
-    model_path: "weight/model3_yolo12x_obb_7class_accident_balanced_v1.0.pt"    # 事故检测新模型（支持7类目标）
-    classes: [0, 1, 2, 3, 4, 5, 6]  # 7类目标：0-事故 1-行人 2-摩托车 3-汽车 4-大型车辆 5-交警 6-警用摩托
+    model_path: "weight/model3_yolo12x_obb_7class_accident_balanced_v1.0.pt"    # 事故检测新模型（支持6类目标）
+    classes: [0, 1, 2, 3, 4, 5,6]  # 6类目标：0-事故 1-行人 2-摩托车 3-汽车 4-大型车辆 5-交警
     config: 0.4  # 通用置信度阈值（作为后备）
-    time_step: 60  # 消息推送的间隔
+    mqtt_cooldown: 240  # ⭐ MQTT上报冷却时间（秒），上报后N秒内不再报送MQTT消息
     imgsz: 1  # 1 代表模型采用原图大小
-    # 分类别置信度阈值配置（支持7类目标独立调整）
+    # 分类别置信度阈值配置（支持6类目标独立调整）
     class_confidence:
-      accident: 0.5           # 0-事故检测阈值
-      pedestrian: 0.4         # 1-行人检测阈值
-      motorcycle: 0.2        # 2-摩托车检测阈值
-      car: 0.5                # 3-汽车检测阈值
-      large_vehicle: 0.4      # 4-大型车辆检测阈值
-      traffic_police: 0.6     # 5-交警检测阈值
-      police_motorcycle: 0.8  # 6-警用摩托检测阈值
+      accident: 0.55           # 0-事故检测阈值
+      pedestrian: 0.5         # 1-行人检测阈值
+      motorcycle: 0.4        # 2-摩托车检测阈值
+      car: 0.3                # 3-汽车检测阈值
+      large_vehicle: 0.6      # 4-大型车辆检测阈值
+      traffic_police: 0.65     # 5-交警检测阈值
+      motorcycle_police: 0.65  # 6-警用摩托检测阈值
     # 事故验证策略配置
     verification_strategy: "overlap"  # 可选: overlap, distance, combined, none
     verification_config:
       # 面积重叠策略配置 (overlap策略使用)
-      overlap_threshold: 0.3  # 重叠面积阈值，默认0.5
+      overlap_threshold: 0.5  # 行人/交警重叠面积阈值
+      vehicle_overlap_threshold: 0.5  # ⭐ 车辆重叠面积阈值（用于一步验证）
 
       # 距离策略配置 (distance策略使用)
       distance_threshold: 200  # 距离阈值（像素），默认200
@@ -63,18 +64,35 @@ model:
       # 联合策略配置 (combined策略使用)
       require_both: false  # 是否需要同时满足重叠和距离条件，false表示满足任一即可
 
+      # ⭐ 一步验证配置（同时验证人和车辆）
+      vehicle_verification:
+        min_pedestrian_police: 2  # ⭐ 最少行人+交警数量
+        min_car_count_normal: 2  # ⭐ 普通事故最少车辆数（car >= 2）
+        enable_motorcycle_accident: true  # ⭐ 是否启用摩托车事故类型
+        enable_large_vehicle_accident: true  # ⭐ 是否启用大型车辆事故类型
+
+      # ⭐ YOLO分数提升配置（自适应）
+      yolo_score_boost_with_police: 0.2     # ⭐ 有交警时的YOLO分数提升值
+      yolo_score_boost_without_police: 0.05  # ⭐ 无交警时的YOLO分数提升值
+
     # VLM 多模态辅助验证配置
     vlm_verification:
       enabled: true  # 开启多模态辅助验证
       stream: true  # 启用流式输出（更快响应，支持早期退出）
-      # prompt1: 普通事故/大型车辆事故验证prompt
-      prompt1: "图中红色框选区域内是否发生了车辆碰撞或交通事故？疑似剐蹭也算，如两辆车贴得很近，周围有两个以上的人在查看车辆，一定要有人。请只回答是或否。"
-      # prompt2: 摩托车事故专用验证prompt
-      prompt2: "图中红色框选区域内是否发生了摩托车(电瓶车)车辆碰撞或交通事故？疑似剐蹭也算，如摩托车与轿车贴得很近，周围有两个以上的人在查看车辆，一定要有人。请只回答是或否。"
+      # ⭐ 三种事故类型的验证prompt（输出置信度分数）
+      prompt_normal: "只回答一个0到1区间的置信度分数。仅识别红色框选区域，谨慎评估区域内是否发生了车辆碰撞或交通事故？疑似剐蹭也算，一定要有两个以上的人，一定要有两辆车。0代表与交通事故毫无关系，1代表发生及其明显的剧烈交通事故，多辆车辆变形。"
+      prompt_motorcycle: "只回答一个0到1区间的置信度分数。仅识别红色框选区域，谨慎评估区域内是否发生了摩托车或电瓶车碰撞交通事故？疑似剐蹭也算，一定要有两个以上的人，一定要有摩托车或电瓶车与汽车。0代表与交通事故毫无关系，1代表发生及其明显的剧烈交通事故，多辆车辆变形。"
+      prompt_large_vehicle: "只回答一个0到1区间的置信度分数。仅识别红色框选区域，谨慎评估区域内是否发生了大型车辆（如卡车、货车、公交车）碰撞交通事故？疑似剐蹭也算，一定要有两个以上的人，一定要有大型车辆。0代表与交通事故毫无关系，1代表发生及其明显的剧烈交通事故，多辆车辆变形。"
       # model: "Qwen/Qwen2.5-VL-72B-Instruct" # 可选：覆盖全局配置的模型
       timeout: 5  # API 超时时间（秒）
       stream_timeout: 8  # 流式接收超时时间（秒），超时后降级使用算法验证结果
-      total_timeout: 15.0  # 硬性总超时时间（秒），超过此时间直接降级使用算法验证结果
+      total_timeout: 12.0  
+      default_confidence: 0.5  # ⭐ VLM超时或失败时的默认置信度分数
+
+      # ⭐ YOLO与VLM协同验证配置
+      yolo_weight: 0.5  # ⭐ YOLO分数权重（0-1）
+      vlm_weight: 0.5  # ⭐ VLM分数权重（0-1）
+      final_threshold: 0.6  # ⭐ 最终总分阈值（超过此值才通过验证）
       # modelscope:
       #   api_key: "sk-d2d735f9d40b42b5bb2c777df2fc864b"
       #   base_url: "http://10.1.38.201:8000/v1/"
@@ -107,8 +125,11 @@ model:
     class_path: "model_library.model.car_model.CarModel"
     model_path: "weight/yolo11x-visdrone.pt"    # 车辆检测_20260108
     config: 0.5
-    classes: [3,4,5,8]
+    classes: [2,3,4,5,6,7,8,9]
     imgsz: 0  # 0 代表模型不采用原图大小
+    # GPU配置
+    estimated_memory: 600  # 预估显存需求(MB)
+    preferred_gpu: null    # ⭐ 测试环境：null=自动分配, 0=强制使用GPU0与模型3共享
   
   6:
     model_name: "infrared"
@@ -140,7 +161,7 @@ model:
     class_path: "model_library.model.base_model.BaseModel"
     model_path: "weight/yolov11x-face-detection.pt"    # 人脸检测_20251125
     # model_path: "weight/yolov11n-face.pt"    # 人脸检测
-    config: 0.5
+    config: 0.6
     classes: [0]
     imgsz: 1  # 1 代表模型采用原图大小
 
@@ -225,12 +246,21 @@ mqtt:
   client-id: "model_library"
 
 
+# minio:
+#   endpoint: "113.105.137.161"
+#   port: 10019
+#   access-key: "zkyy"
+#   secret-key: "Zkyy2021"
+#   bucket: "cloud-bucket"
+
 minio:
-  endpoint: "113.105.137.161"
-  port: 10019
+  endpoint: "aiuav.satxspace-dg.cn"
+  port: 10064
   access-key: "zkyy"
   secret-key: "Zkyy2021"
   bucket: "cloud-bucket"
+
+
 
 modelscope:
   api_key: "sk-d2d735f9d40b42b5bb2c777df2fc864b"

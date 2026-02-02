@@ -7,19 +7,22 @@ from typing import Optional, Dict, Any
 from model_library.tools.logger import log_task_debug, log_task_error
 
 class VLMVerifier:
-    """VLM 多模态验证器"""
+    """VLM 多模态验证器 - 返回置信度分数"""
 
     def __init__(self, config: Dict[str, Any], global_modelscope_conf: Dict[str, Any] = None):
         self.enabled = config.get('enabled', False)
 
-        # 支持多个prompt：prompt1(普通/大型车辆), prompt2(摩托车)
-        self.prompt1 = config.get('prompt1', config.get('prompt', "这张图片中是否发生了交通事故？请只回答是或否。"))
-        self.prompt2 = config.get('prompt2', self.prompt1)  # 默认使用prompt1
-        self.current_prompt = self.prompt1  # 当前使用的prompt
+        # 支持三种事故类型的prompt（输出置信度分数）
+        self.prompt_normal = config.get('prompt_normal',
+            "仅识别红色框选区域，区域内是否发生了车辆碰撞或交通事故？红框内一定要有两个以上的人在面对面交流，一定要有两辆车。必须只回答一个(0,1)区间的置信度分数。")
+        self.prompt_motorcycle = config.get('prompt_motorcycle', self.prompt_normal)
+        self.prompt_large_vehicle = config.get('prompt_large_vehicle', self.prompt_normal)
+        self.current_prompt = self.prompt_normal  # 当前使用的prompt
         self.timeout = config.get('timeout', 10.0)
         self.stream = config.get('stream', True)  # 是否使用流式输出，默认开启
         self.stream_timeout = config.get('stream_timeout', 10.0)  # 流式接收超时时间
         self.total_timeout = config.get('total_timeout', 15.0)  # 硬性总超时时间
+        self.default_confidence = config.get('default_confidence', 0.5)  # 超时或失败时的默认分数
 
         if not self.enabled:
             return
@@ -108,6 +111,57 @@ class VLMVerifier:
 
         return "unknown"
 
+    def _extract_confidence_score(self, text: str) -> Optional[float]:
+        """
+        从VLM输出中提取置信度分数
+        ⭐ 严格限制：只提取0.01-0.99范围的数字，避免提取列表编号
+
+        Args:
+            text: VLM输出的文本
+
+        Returns:
+            float: 提取到的置信度分数（0.01-0.99），如果无法提取则返回None
+        """
+        import re
+
+        # ⭐ 策略1：优先匹配带"置信度"关键词的数字
+        keyword_patterns = [
+            r'置信度[：:]\s*([0-9.]+)',  # "置信度: 0.85"
+            r'置信度分数[：:]\s*([0-9.]+)',  # "置信度分数: 0.85"
+            r'分数[：:]\s*([0-9.]+)',  # "分数: 0.85"
+            r'置信度为\s*([0-9.]+)',  # "置信度为0.85"
+        ]
+
+        for pattern in keyword_patterns:
+            match = re.search(pattern, text)
+            if match:
+                try:
+                    score = float(match.group(1))
+                    # 归一化到[0, 1]
+                    if score > 1:
+                        score = score / 100.0
+                    # ⭐ 严格限制：只接受0.01-0.99范围
+                    if 0.01 <= score <= 0.99:
+                        return score
+                except (ValueError, IndexError):
+                    continue
+
+        # ⭐ 策略2：匹配纯小数格式（0.xxxx），避免匹配列表编号
+        # 只匹配 "0.xxx" 格式，不匹配 "1.0" 或 "100"
+        decimal_pattern = r'\b0\.[0-9]+\b'
+        numbers = re.findall(decimal_pattern, text)
+        if numbers:
+            try:
+                score = float(numbers[0])
+                # ⭐ 严格限制：只接受0.01-0.99范围
+                if 0.01 <= score <= 0.99:
+                    return score
+            except (ValueError, IndexError):
+                pass
+
+        # 无法提取有效分数
+        return None
+
     def _init_client(self):
         """初始化OpenAI客户端，支持配置切换"""
         if self.current_config_index >= len(self.configs):
@@ -177,16 +231,18 @@ class VLMVerifier:
 
         return result[0], None
 
-    def verify_accident(self, image: np.ndarray) -> bool:
+    def verify_accident(self, image: np.ndarray) -> float:
         """
-        使用 VLM 验证事故（支持流式/非流式，带早期退出和超时降级）
-        Returns: True 表示确认为事故，False 表示不是事故
+        使用 VLM 验证事故，返回置信度分数（支持流式/非流式，带早期退出和超时降级）
+
+        Returns:
+            float: 置信度分数（0-1），1.0表示确认为事故，0.0表示不是事故
         """
         if not self.enabled:
-            return True # 如果未启用，默认通过
+            return 1.0  # 如果未启用，默认返回最高置信度
 
         if image is None or image.size == 0:
-            return False
+            return 0.0
 
         # 使用配置中的总超时时间
         total_timeout = self.total_timeout
@@ -215,11 +271,13 @@ class VLMVerifier:
             accident_type: 事故类型 ("motorcycle", "large_vehicle", "normal")
         """
         if accident_type == "motorcycle":
-            self.current_prompt = self.prompt2
-        else:  # large_vehicle or normal
-            self.current_prompt = self.prompt1
+            self.current_prompt = self.prompt_motorcycle
+        elif accident_type == "large_vehicle":
+            self.current_prompt = self.prompt_large_vehicle
+        else:  # normal
+            self.current_prompt = self.prompt_normal
 
-    def verify_accident_with_type(self, image: np.ndarray, accident_type: str) -> bool:
+    def verify_accident_with_type(self, image: np.ndarray, accident_type: str) -> float:
         """
         使用指定的事故类型验证事故（自动选择prompt）
 
@@ -228,23 +286,23 @@ class VLMVerifier:
             accident_type: 事故类型 ("motorcycle", "large_vehicle", "normal")
 
         Returns:
-            bool: True表示确认为事故，False表示不是事故
+            float: 置信度分数（0-1），1.0表示确认为事故，0.0表示不是事故
         """
         # 设置对应的prompt
         self.set_prompt_by_accident_type(accident_type)
         # 执行验证
         return self.verify_accident(image)
 
-    def _verify_with_stream(self, image: np.ndarray, overall_start_time: float, total_timeout: float) -> bool:
-        """流式验证（支持早期退出和配置切换）"""
+    def _verify_with_stream(self, image: np.ndarray, overall_start_time: float, total_timeout: float) -> float:
+        """流式验证（支持早期退出和配置切换），返回置信度分数"""
         start_time = time.time()
 
         # 图像编码（只需要编码一次）
-        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        success, buffer = cv2.imencode(".jpg", rgb_image)
+        # ⭐ 直接使用BGR格式编码，不需要转换为RGB（cv2.imencode期望BGR格式）
+        success, buffer = cv2.imencode(".jpg", image)
         if not success:
             log_task_error("VLM验证: 图像编码失败")
-            return False
+            return 0.0
 
         b64_image = base64.b64encode(buffer.tobytes()).decode("utf-8")
         image_url = f"data:image/jpeg;base64,{b64_image}"
@@ -254,8 +312,8 @@ class VLMVerifier:
             # 检查总超时时间
             overall_elapsed = time.time() - overall_start_time
             if overall_elapsed > total_timeout:
-                log_task_error(f"VLM验证总超时({overall_elapsed:.1f}秒)，降级使用算法验证结果")
-                return True
+                log_task_error(f"VLM验证总超时({overall_elapsed:.1f}秒)，返回默认分数: {self.default_confidence}")
+                return self.default_confidence
             config = self.current_config
             if not config or not self.client:
                 if not self._try_next_config():
@@ -310,30 +368,28 @@ class VLMVerifier:
                             # 拼接已收到的内容
                             partial = ''.join(collected_content).strip()
 
-                            # 早期退出：使用优化的关键词检查
-                            if len(partial) > 0:
-                                keyword_result = self._check_keywords_optimized(partial)
-
-                                # 提前确认：发现肯定关键词
-                                if keyword_result == "positive":
+                            # 早期退出：尝试提取置信度分数
+                            if len(partial) > 3:
+                                confidence = self._extract_confidence_score(partial)
+                                if confidence is not None:
                                     elapsed = time.time() - start_time
-                                    log_task_debug(f"VLM提前确认事故(耗时{elapsed:.2f}秒, 配置: {config['name']}): {partial}")
-                                    return True
+                                    log_task_debug(f"VLM提前提取到置信度分数(耗时{elapsed:.2f}秒, 配置: {config['name']}): {confidence} (原始文本: {partial})")
+                                    return confidence
 
-                                # 提前否认：需要足够长度且发现否定关键词
-                                if len(partial) >= 5 and keyword_result == "negative":
-                                    elapsed = time.time() - start_time
-                                    log_task_debug(f"VLM提前否认事故(耗时{elapsed:.2f}秒, 配置: {config['name']}): {partial}")
-                                    return False
-
-                # 流式接收完成，使用完整内容判断
+                # 流式接收完成，使用完整内容提取分数
                 content = ''.join(collected_content).strip()
                 elapsed = time.time() - start_time
                 log_task_debug(f"VLM验证响应成功(耗时{elapsed:.2f}秒, 配置: {config['name']}): {content}")
 
-                # 最终判断使用优化的关键词检查
-                keyword_result = self._check_keywords_optimized(content)
-                return keyword_result == "positive"
+                # 尝试提取置信度分数
+                confidence = self._extract_confidence_score(content)
+                if confidence is not None:
+                    log_task_debug(f"VLM成功提取置信度分数: {confidence}")
+                    return confidence
+                else:
+                    # ⭐ 如果无法提取分数，直接返回默认分数（不使用关键词检查）
+                    log_task_debug(f"VLM无法提取置信度分数，返回默认分数: {self.default_confidence}")
+                    return self.default_confidence
 
             except Exception as e:
                 elapsed = time.time() - config_start_time
@@ -354,20 +410,20 @@ class VLMVerifier:
                         break
                     continue
 
-        # 所有配置都尝试失败，降级使用算法验证结果
-        log_task_error("所有VLM配置都失败，降级使用算法验证结果")
-        return True
+        # 所有配置都尝试失败，返回默认分数
+        log_task_error(f"所有VLM配置都失败，返回默认分数: {self.default_confidence}")
+        return self.default_confidence
     
-    def _verify_without_stream(self, image: np.ndarray, overall_start_time: float, total_timeout: float) -> bool:
-        """非流式验证（支持配置切换）"""
+    def _verify_without_stream(self, image: np.ndarray, overall_start_time: float, total_timeout: float) -> float:
+        """非流式验证（支持配置切换），返回置信度分数"""
         start_time = time.time()
 
         # 图像编码（只需要编码一次）
-        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        success, buffer = cv2.imencode(".jpg", rgb_image)
+        # ⭐ 直接使用BGR格式编码，不需要转换为RGB（cv2.imencode期望BGR格式）
+        success, buffer = cv2.imencode(".jpg", image)
         if not success:
             log_task_error("VLM验证: 图像编码失败")
-            return False
+            return 0.0
 
         b64_image = base64.b64encode(buffer.tobytes()).decode("utf-8")
         image_url = f"data:image/jpeg;base64,{b64_image}"
@@ -377,8 +433,8 @@ class VLMVerifier:
             # 检查总超时时间
             overall_elapsed = time.time() - overall_start_time
             if overall_elapsed > total_timeout:
-                log_task_error(f"VLM验证总超时({overall_elapsed:.1f}秒)，降级使用算法验证结果")
-                return True
+                log_task_error(f"VLM验证总超时({overall_elapsed:.1f}秒)，返回默认分数: {self.default_confidence}")
+                return self.default_confidence
             config = self.current_config
             if not config or not self.client:
                 if not self._try_next_config():
@@ -422,9 +478,15 @@ class VLMVerifier:
                 elapsed = time.time() - start_time
                 log_task_debug(f"VLM验证响应成功(耗时{elapsed:.2f}秒, 配置: {config['name']}): {content}")
 
-                # 使用优化的关键词检查方法
-                keyword_result = self._check_keywords_optimized(content)
-                return keyword_result == "positive"
+                # 尝试提取置信度分数
+                confidence = self._extract_confidence_score(content)
+                if confidence is not None:
+                    log_task_debug(f"VLM成功提取置信度分数: {confidence}")
+                    return confidence
+                else:
+                    # ⭐ 如果无法提取分数，直接返回默认分数（不使用关键词检查）
+                    log_task_debug(f"VLM无法提取置信度分数，返回默认分数: {self.default_confidence}")
+                    return self.default_confidence
 
             except Exception as e:
                 elapsed = time.time() - config_start_time
@@ -445,7 +507,7 @@ class VLMVerifier:
                         break
                     continue
 
-        # 所有配置都尝试失败，降级使用算法验证结果
-        log_task_error("所有VLM配置都失败，降级使用算法验证结果")
-        return True
+        # 所有配置都尝试失败，返回默认分数
+        log_task_error(f"所有VLM配置都失败，返回默认分数: {self.default_confidence}")
+        return self.default_confidence
 

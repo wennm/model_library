@@ -85,6 +85,13 @@ class Detector:
         log_task_debug(f"获取模型实例 - 任务ID:{task_id}, 模型:{self.model_name}")
         self.model = model_manager.get_model(self.model_index, task_id)
 
+        # ⭐ 模型3特殊初始化：强制模型5使用与模型3相同的GPU（测试环境单GPU共享）
+        if self.model_index_3:
+            model3_device = getattr(self.model, 'device', None)
+            if model3_device and model3_device.startswith('cuda'):
+                # 临时修改模型5配置，添加device_override（使模型5共享GPU）
+                self.config.model_list[5]['device_override'] = model3_device
+
         # 在模型加载后初始化完整的事故识别系统（仅用于模型3）
         if self.model_index_3:
             self.verification_manager = AccidentStrategyFactory.create_complete_accident_system(
@@ -185,9 +192,9 @@ class Detector:
         return cls._instance_count
 
   
-    async def _save_and_publish_accident(self, result, accident_item, object_name, ori_img_shape, timestamp_str, message=None):
+    async def _save_and_publish_accident(self, result, accident_item, object_name, ori_img_shape, timestamp_str, message=None, accident_type=None, verification_info=None):
         """
-        保存事故图像并发布MQTT消息（支持事故类型message）
+        保存事故图像并发布MQTT消息（支持事故类型和验证详情）
 
         Args:
             result: YOLO检测结果
@@ -196,6 +203,8 @@ class Detector:
             ori_img_shape: 原始图像尺寸
             timestamp_str: 时间戳字符串
             message: 可选的事故类型描述消息
+            accident_type: 事故类型 (normal/motorcycle/large_vehicle)
+            verification_info: 验证详情字典
         """
         try:
             # 检查MQTT冷却时间（仅用于模型3）
@@ -218,17 +227,18 @@ class Detector:
                 quality=85
             )
 
-            # 使用MQTT格式化器构建消息（传递message参数）
+            # 使用MQTT格式化器构建消息（传递事故类型和验证详情）
             mqtt_message = MQTTMessageFormatter.format_accident_message(
                 object_name=object_name,
                 accident_item=accident_item,
                 ori_img_shape=ori_img_shape,
                 task_id=self.task_id,
                 timestamp_str=timestamp_str,
-                message=message
+                message=message,
+                accident_type=accident_type,
+                verification_info=verification_info
             )
-            # 确保objNum使用len(result)以保持原有逻辑
-            mqtt_message["imageInfo"]["objNum"] = len(result)
+            # ⭐ objNum由MQTT格式化器自动计算：1 + accident_car_count
 
             # 发送MQTT消息
             log_task_debug(f"发送事故MQTT消息 - 任务ID:{self.task_id}, 主题:{self.topic}")
@@ -619,7 +629,7 @@ class Detector:
 
                         if class_id == 0 or class_name == 'accident':  # class=0
                             accident_boxes.append(result_item)
-                        elif class_id == 1 or class_name == 'pedestria':  # class=1
+                        elif class_id == 1 or class_name == 'pedestrian':  # class=1  ⚠️ 修正拼写
                             pedestrian_boxes.append(result_item)
                         elif class_id == 2 or class_name == 'motorcycle':  # class=2
                             motorcycle_boxes.append(result_item)
@@ -688,37 +698,178 @@ class Detector:
                         log_task_debug(f"事故图片保存路径 - 任务ID:{self.task_id}, 路径:{object_name}")
                         accident_id.append(id)
 
-                        # 事故车辆数量识别
+                        # ========== 事故车辆数量识别（使用模型5专用车辆检测） ==========
                         car_time_start = time.time()
-                        car_result = await reasoner_single.infer_image(result.orig_img, 5, post_msg=False)
-                        accident_obb = [result_item['x'], result_item['y'], result_item['width'],
-                                      result_item['height'], result_item['rotation']]
 
-                        if len(car_result[0]) == 0:  # 没有识别到车辆
-                            log_task_debug(f"事故现场无车辆，跳过上报 - 任务ID:{self.task_id}, 事件ID:{id}")
+                        # 提取事故框OBB坐标
+                        accident_obb = [
+                            result_item['x'],
+                            result_item['y'],
+                            result_item['width'],
+                            result_item['height'],
+                            result_item['rotation']
+                        ]
+
+                        # ⭐ 调用模型5（专用车辆检测模型）检测车辆
+                        car_time_start = time.time()
+
+                        try:
+                            car_result = await reasoner_single.infer_image(
+                                result.orig_img,
+                                5,  # 模型5
+                                post_msg=False
+                            )
+
+                            # 处理模型5的检测结果
+                            motorcycle_boxes_m5 = []  # 摩托车/电动车
+                            car_boxes_m5 = []  # 普通车辆（car, van）
+                            large_vehicle_boxes_m5 = []  # 大型车辆（truck, bus）
+
+                            if car_result and len(car_result) > 0:
+                                result_m5 = car_result[0]
+
+                                # 获取OBB检测框信息
+                                if hasattr(result_m5, 'obb') and result_m5.obb is not None:
+                                    obb_m5 = result_m5.obb
+                                    cls_m5 = obb_m5.cls.tolist()
+                                    conf_m5 = obb_m5.conf.tolist()
+                                    xywhr_m5 = obb_m5.xywhr.tolist()
+
+                                    # 分类模型5的检测结果
+                                    for i, (class_id_m5, conf_m5, box_m5) in enumerate(zip(cls_m5, conf_m5, xywhr_m5)):
+                                        class_id_m5 = int(class_id_m5)
+
+                                        # 模型5类别映射：
+                                        # 0: pedestrian (忽略)
+                                        # 1: people (忽略)
+                                        # 2: bicycle → 摩托车
+                                        # 3: car → 普通车辆
+                                        # 4: van → 普通车辆
+                                        # 5: truck → 大型车辆
+                                        # 6: tricycle → 摩托车
+                                        # 7: awning-tricycle → 摩托车
+                                        # 8: bus → 大型车辆
+                                        # 9: motor → 摩托车
+
+                                        if class_id_m5 in [0, 1]:
+                                            # 忽略行人和人群
+                                            continue
+
+                                        # 转换为统一格式
+                                        vehicle_box = {
+                                            'x': box_m5[0],
+                                            'y': box_m5[1],
+                                            'width': box_m5[2],
+                                            'height': box_m5[3],
+                                            'rotation': box_m5[4],  # OBB旋转角度
+                                            'score': conf_m5,
+                                            'track_id': f"m5_{i}",
+                                            'classed': class_id_m5,
+                                            'className': result_m5.names[class_id_m5]
+                                        }
+
+                                        # 分类到对应的列表
+                                        if class_id_m5 in [3, 4]:  # car, van
+                                            car_boxes_m5.append(vehicle_box)
+                                        elif class_id_m5 in [5, 8]:  # truck, bus
+                                            large_vehicle_boxes_m5.append(vehicle_box)
+                                        elif class_id_m5 in [2, 6, 7, 9]:  # bicycle, tricycle, awning-tricycle, motor
+                                            motorcycle_boxes_m5.append(vehicle_box)
+
+                            # 合并所有车辆
+                            all_vehicle_boxes_m5 = car_boxes_m5 + motorcycle_boxes_m5 + large_vehicle_boxes_m5
+
+                            log_task_debug(
+                                f"模型5车辆检测完成 - 任务ID:{self.task_id}, 事件ID:{id}, "
+                                f"摩托车:{len(motorcycle_boxes_m5)}, 汽车:{len(car_boxes_m5)}, "
+                                f"大型车辆:{len(large_vehicle_boxes_m5)}, 总计:{len(all_vehicle_boxes_m5)}"
+                            )
+
+                        except Exception as e:
+                            log_task_error(f"模型5检测失败 - 任务ID:{self.task_id}, 事件ID:{id}, 错误:{str(e)}")
+                            import traceback
+                            log_task_error(f"错误详情: {traceback.format_exc()}")
+                            all_vehicle_boxes_m5 = []
+
+                        if len(all_vehicle_boxes_m5) == 0:  # 没有识别到车辆
+                            log_task_debug(f"模型5未检测到车辆，跳过上报 - 任务ID:{self.task_id}, 事件ID:{id}")
                             continue
 
-                        car_result_obb = car_result[0].obb.xyxyxyxy.tolist()
-                        inter_index = GeometryUtils.intersection_judgment(accident_obb, car_result_obb)
+                        # 将所有车辆框转换为OBB格式
+                        all_vehicle_obb = []
+                        for vehicle_box in all_vehicle_boxes_m5:
+                            vehicle_obb = [
+                                vehicle_box['x'],
+                                vehicle_box['y'],
+                                vehicle_box['width'],
+                                vehicle_box['height'],
+                                vehicle_box['rotation']
+                            ]
+                            # 将xywhr转换为8点格式
+                            import math
+                            x, y, w, h, angle = vehicle_obb
+                            cos_a, sin_a = math.cos(angle), math.sin(angle)
+                            corners = [[-w/2, -h/2], [w/2, -h/2], [w/2, h/2], [-w/2, h/2]]
+                            box_vertices = [(cx * cos_a - cy * sin_a + x, cx * sin_a + cy * cos_a + y)
+                                          for cx, cy in corners]
+                            all_vehicle_obb.append(box_vertices)
+
+                        # ⭐ 获取车辆重叠阈值配置（与一步验证保持一致）
+                        from model_library.tools.utils import Config
+                        config_obj = Config()
+                        model_config = config_obj.model_list[3]
+                        verification_config = model_config.get('verification_config', {})
+                        vehicle_overlap_threshold = verification_config.get('vehicle_overlap_threshold', 0.5)
+
+                        # 计算车辆与事故框的交集
+                        # ⭐ 使用config中配置的阈值，默认0.5（与一步验证保持一致）
+                        inter_index = GeometryUtils.intersection_judgment(
+                            accident_obb,
+                            all_vehicle_obb,
+                            threshold=vehicle_overlap_threshold
+                        )
                         accident_car = len(inter_index)
 
+                        # ⭐ 增强日志：显示重叠判断详情
+                        log_task_debug(
+                            f"车辆重叠判断 - 任务ID:{self.task_id}, 事件ID:{id}, "
+                            f"检测到车辆数:{len(all_vehicle_obb)}, "
+                            f"事故框内车辆数:{accident_car}, "
+                            f"重叠阈值:{vehicle_overlap_threshold}(config配置)"
+                        )
+
                         if accident_car == 0:
-                            log_task_debug(f"事故现场无车辆，跳过上报 - 任务ID:{self.task_id}, 事件ID:{id}")
+                            log_task_debug(f"事故框内无车辆，跳过上报 - 任务ID:{self.task_id}, 事件ID:{id}")
                             continue
 
-                        accident_obb_list = [car_result_obb[i] for i in inter_index]
+                        # 提取涉事车辆的OBB坐标
+                        accident_obb_list = [all_vehicle_obb[i] for i in inter_index]
                         # 转换格式：[[x,y],[x,y],[x,y],[x,y]] -> [x,y,x,y,x,y,x,y]
                         accident_obb_list = [[coord for point in shape for coord in point] for shape in accident_obb_list]
 
                         car_time_end = time.time()
+
+                        # 将车辆统计信息添加到结果项
                         result_item['accident_car_count'] = accident_car
                         result_item['accident_car_xyxy'] = accident_obb_list
-                        log_task_debug(f"事故车辆识别完成 - 任务ID:{self.task_id}, 事件ID:{id}, 车辆数:{accident_car}, 耗时:{car_time_end - car_time_start:.3f}秒")
 
-                        # 事故类型分类（摩托车/大型车辆/普通）
+                        # ⭐ 增强日志：记录车辆类别统计详情（使用模型5检测结果）
+                        log_task_debug(
+                            f"事故车辆识别完成 - 任务ID:{self.task_id}, 事件ID:{id}, "
+                            f"车辆总数:{accident_car}, "
+                            f"摩托车:{len(motorcycle_boxes_m5)}, "
+                            f"汽车:{len(car_boxes_m5)}, "
+                            f"大型车辆:{len(large_vehicle_boxes_m5)}, "
+                            f"耗时:{car_time_end - car_time_start:.3f}秒"
+                        )
+
+                        # 事故类型初步分类（摩托车/大型车辆/普通）
+                        # ⭐ 使用模型5检测到的车辆进行分类
                         from model_library.tools.accident_strategies import classify_accident_type
-                        all_boxes = (accident_boxes + pedestrian_boxes + motorcycle_boxes +
-                                   car_boxes + large_vehicle_boxes + traffic_police_boxes +
+
+                        # 合并模型3检测的目标（事故、行人、交警）和模型5检测的车辆
+                        all_boxes = (accident_boxes + pedestrian_boxes + motorcycle_boxes_m5 +
+                                   car_boxes_m5 + large_vehicle_boxes_m5 + traffic_police_boxes +
                                    police_motorcycle_boxes)
                         accident_type_info = classify_accident_type(result_item, all_boxes)
                         accident_type = accident_type_info['accident_type']
@@ -730,36 +881,137 @@ class Detector:
                                      f"交警:{accident_type_info['police_count']}, "
                                      f"消息:{accident_message}")
 
-                        # 一步验证：检查事故框内行人+交警数量是否≥2
-                        pedestrian_police_count = (accident_type_info['pedestrian_count'] +
-                                                  accident_type_info['police_count'])
-                        log_task_debug(f"一步验证 - 任务ID:{self.task_id}, 事件ID:{id}, "
-                                     f"行人+交警数量:{pedestrian_police_count}")
+                        # ========== 新的协同验证流程 ==========
+                        # 步骤1: 一步验证（人+车辆验证）
+                        from model_library.tools.accident_strategies import verify_accident_with_vehicles
 
-                        if pedestrian_police_count < 2:
-                            log_task(f"一步验证失败，行人+交警数量不足2个，跳过上报 - 任务ID:{self.task_id}, 事件ID:{id}, 数量:{pedestrian_police_count}")
+                        # ⭐ 复用之前获取的配置对象（避免重复读取）
+                        vehicle_verification_config = model_config.get('verification_config', {}).get('vehicle_verification', {})
+                        vlm_config = model_config.get('vlm_verification', {})
+
+                        # 执行一步验证（使用模型5检测到的车辆）
+                        step1_result = verify_accident_with_vehicles(
+                            result_item,
+                            pedestrian_boxes,
+                            traffic_police_boxes,
+                            car_boxes_m5,  # ⭐ 使用模型5检测的汽车
+                            motorcycle_boxes_m5,  # ⭐ 使用模型5检测的摩托车
+                            large_vehicle_boxes_m5,  # ⭐ 使用模型5检测的大型车辆
+                            vehicle_verification_config
+                        )
+
+                        # ⭐ 增强日志：显示一步验证的详细信息
+                        original_score = step1_result.get('original_score', 0.0)
+                        yolo_boost = step1_result.get('yolo_score_boost', 0.0)
+                        boosted_score = step1_result['boosted_score']
+                        boost_reason = step1_result['boost_reason']
+
+                        log_task(f"一步验证完成 - 任务ID:{self.task_id}, 事件ID:{id}, "
+                                f"原始YOLO分数:{original_score:.3f}, "
+                                f"分数提升:{yolo_boost:.3f}({boost_reason}), "
+                                f"提升后分数:{boosted_score:.3f}, "
+                                f"结果:{step1_result['message']}")
+
+                        if not step1_result['passed']:
+                            log_task(f"一步验证失败，跳过上报 - 任务ID:{self.task_id}, 事件ID:{id}, 原因:{step1_result['message']}")
                             continue
 
-                        log_task(f"一步验证通过 - 任务ID:{self.task_id}, 事件ID:{id}, 行人+交警数量:{pedestrian_police_count}")
+                        # 使用一步验证确定的事故类型（优先使用一步验证的结果）
+                        accident_type = step1_result['accident_type']
+                        boosted_yolo_score = boosted_score
 
-                        # 二步验证：VLM 多模态验证（根据事故类型使用不同的prompt）
-                        if self.vlm_verifier and self.vlm_verifier.enabled:
+                        log_task(f"一步验证通过 - 任务ID:{self.task_id}, 事件ID:{id}, "
+                                f"事故类型:{accident_type}, "
+                                f"YOLO分数:{original_score:.3f} → {boosted_yolo_score:.3f} (+{yolo_boost:.3f})")
+
+                        # 步骤2: VLM多模态验证（获取置信度分数）
+                        vlm_confidence = 0.0
+                        vlm_enabled = self.vlm_verifier and self.vlm_verifier.enabled
+
+                        if vlm_enabled:
                             vlm_start_time = time.time()
+                            # 根据事故类型选择对应的prompt
+                            prompt_type = "普通" if accident_type == "normal" else ("摩托车" if accident_type == "motorcycle" else "大型车辆")
+
+                            log_task_debug(f"VLM验证开始 - 任务ID:{self.task_id}, 事件ID:{id}, "
+                                         f"事故类型:{accident_type}, Prompt类型:{prompt_type}, "
+                                         f"流式输出:{self.vlm_verifier.stream}, "
+                                         f"超时配置:{self.vlm_verifier.total_timeout}秒")
+
                             # 使用绘制了事故框的图片进行验证，帮助大模型聚焦
                             vlm_image = self.verification_manager.plot_verified_accidents_only(result, [result_item])
-                            # 根据事故类型使用对应的prompt进行验证
-                            is_confirmed = self.vlm_verifier.verify_accident_with_type(vlm_image, accident_type)
+                            # 根据事故类型使用对应的prompt进行验证，获取置信度分数
+                            vlm_confidence = self.vlm_verifier.verify_accident_with_type(vlm_image, accident_type)
 
-                            log_task_debug(f"VLM验证结果(类型:{accident_type}): {is_confirmed}, 耗时:{time.time() - vlm_start_time:.3f}秒")
+                            vlm_elapsed = time.time() - vlm_start_time
+                            # 检查是否使用了默认分数（超时或失败）
+                            used_default = "使用默认分数" if vlm_confidence == self.vlm_verifier.default_confidence else "正常返回"
 
-                            if not is_confirmed:
-                                log_task(f"VLM未确认事故，跳过上报 - 任务ID:{self.task_id}, 事件ID:{id}, 事故类型:{accident_type}")
-                                continue
+                            log_task(f"VLM验证完成 - 任务ID:{self.task_id}, 事件ID:{id}, "
+                                    f"Prompt类型:{prompt_type}, "
+                                    f"VLM置信度:{vlm_confidence:.3f}({used_default}), "
+                                    f"耗时:{vlm_elapsed:.3f}秒")
+                        else:
+                            log_task_debug(f"VLM验证未启用 - 任务ID:{self.task_id}, 事件ID:{id}, 使用默认分数:{vlm_confidence:.3f}")
 
-                            log_task(f"VLM验证通过 - 任务ID:{self.task_id}, 事件ID:{id}, 事故类型:{accident_type}")
+                        # 步骤3: YOLO与VLM协同验证
+                        yolo_weight = vlm_config.get('yolo_weight', 0.5)
+                        vlm_weight = vlm_config.get('vlm_weight', 0.5)
+                        final_threshold = vlm_config.get('final_threshold', 0.6)
 
-                        # 保存和上报事故信息（传递message参数）
-                        await self._save_and_publish_accident(result, result_item, object_name, ori_img_shape, timestamp_str, accident_message)
+                        # 计算加权总分
+                        final_score = yolo_weight * boosted_yolo_score + vlm_weight * vlm_confidence
+
+                        # ⭐ 增强日志：显示协同验证的详细计算过程
+                        log_task(f"协同验证计算 - 任务ID:{self.task_id}, 事件ID:{id}, "
+                                f"计算: {yolo_weight:.2f}×{boosted_yolo_score:.3f} + {vlm_weight:.2f}×{vlm_confidence:.3f} = {final_score:.3f}, "
+                                f"阈值:{final_threshold}")
+
+                        if final_score < final_threshold:
+                            log_task(f"❌ 协同验证失败 - 任务ID:{self.task_id}, 事件ID:{id}, "
+                                    f"总分:{final_score:.3f} < 阈值:{final_threshold}, 跳过上报")
+                            continue
+
+                        log_task(f"✅ 协同验证通过 - 任务ID:{self.task_id}, 事件ID:{id}, "
+                                f"总分:{final_score:.3f} >= 阈值:{final_threshold}, "
+                                f"事故类型:{accident_type}, 准备上报")
+
+                        # 更新事故消息（根据一步验证的结果）
+                        if accident_type == "motorcycle":
+                            accident_message = f"摩托车事故（{step1_result['message']}）"
+                        elif accident_type == "large_vehicle":
+                            accident_message = f"大型车辆事故（{step1_result['message']}）"
+                        else:  # normal
+                            accident_message = f"普通事故（{step1_result['message']}）"
+
+                        # ⭐ 增强日志：上报前汇总所有验证信息
+                        log_task(f"🚨 事故上报汇总 - 任务ID:{self.task_id}, 事件ID:{id}, "
+                                f"类型:{accident_type}, "
+                                f"YOLO:{original_score:.3f}→{boosted_yolo_score:.3f}, "
+                                f"VLM:{vlm_confidence:.3f}, "
+                                f"最终总分:{final_score:.3f}, "
+                                f"消息:{accident_message}")
+
+                        # ⭐ 构建验证详情信息（用于MQTT消息）
+                        verification_info = {
+                            "pedestrian_count": step1_result.get('pedestrian_count', 0),
+                            "police_count": step1_result.get('police_count', 0),
+                            "car_count": step1_result.get('car_count', 0),
+                            "motorcycle_count": step1_result.get('motorcycle_count', 0),
+                            "large_vehicle_count": step1_result.get('large_vehicle_count', 0),
+                            "has_police": step1_result.get('police_count', 0) > 0,
+                            "original_yolo_score": round(original_score, 3),
+                            "boosted_yolo_score": round(boosted_yolo_score, 3),
+                            "yolo_score_boost": round(yolo_boost, 3),
+                            "vlm_confidence": round(vlm_confidence, 3),
+                            "final_score": round(final_score, 3)
+                        }
+
+                        # 保存和上报事故信息（传递事故类型和验证详情）
+                        await self._save_and_publish_accident(
+                            result, result_item, object_name, ori_img_shape, timestamp_str,
+                            accident_message, accident_type, verification_info
+                        )
                     accident_time_end = time.time()
                     log_task_debug(
                         f"事故检测处理完成 - 任务ID:{self.task_id}, 总耗时:{accident_time_end - accident_time_start:.3f}秒")
